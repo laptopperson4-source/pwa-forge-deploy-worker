@@ -95,27 +95,43 @@ export default {
         if (!putRes.ok) throw new Error(`Could not push ${path}: ` + await putRes.text());
       }
 
-      // 4. Create a Cloudflare Pages project sourced from that repo
+      // 4. Create a Cloudflare Pages project sourced from that repo, with a
+      // settle delay + one retry — connecting too fast after repo creation
+      // is a known cause of Cloudflare silently returning success:true while
+      // dropping the git source and creating a disconnected project instead.
       const cfHeaders = { 'Authorization': `Bearer ${env.CF_API_TOKEN}`, 'Content-Type': 'application/json' };
-      const cfRes = await fetch(`${CF_API}/accounts/${env.CF_ACCOUNT_ID}/pages/projects`, {
-        method: 'POST', headers: cfHeaders,
-        body: JSON.stringify({
-          name: slug,
-          production_branch: branch,
-          source: {
-            type: 'github',
-            config: {
-              owner,
-              repo_name: slug,
-              production_branch: branch,
-              deployments_enabled: true
+      async function tryCreateProject(){
+        const cfRes = await fetch(`${CF_API}/accounts/${env.CF_ACCOUNT_ID}/pages/projects`, {
+          method: 'POST', headers: cfHeaders,
+          body: JSON.stringify({
+            name: slug,
+            production_branch: branch,
+            source: {
+              type: 'github',
+              config: { owner, repo_name: slug, production_branch: branch, deployments_enabled: true }
             }
-          }
-        })
-      });
-      const cfData = await cfRes.json();
-      if (!cfRes.ok || !cfData.success) {
-        throw new Error('Cloudflare project creation failed: ' + JSON.stringify(cfData.errors || cfData));
+          })
+        });
+        const cfData = await cfRes.json();
+        if (!cfRes.ok || !cfData.success) {
+          throw new Error('Cloudflare project creation failed: ' + JSON.stringify(cfData.errors || cfData));
+        }
+        const gotSource = cfData.result && cfData.result.source && cfData.result.source.type;
+        return { ok: gotSource === 'github', cfData };
+      }
+
+      await new Promise(r => setTimeout(r, 2500));
+      let attempt = await tryCreateProject();
+      if (!attempt.ok) {
+        // Clean up the disconnected project and retry once, further back.
+        await fetch(`${CF_API}/accounts/${env.CF_ACCOUNT_ID}/pages/projects/${slug}`, {
+          method: 'DELETE', headers: cfHeaders
+        }).catch(() => {});
+        await new Promise(r => setTimeout(r, 5000));
+        attempt = await tryCreateProject();
+      }
+      if (!attempt.ok) {
+        throw new Error('Project created but never connected to GitHub after two attempts. Repo is at https://github.com/' + owner + '/' + slug + ' — you can connect it manually in the Cloudflare dashboard (Pages -> Create -> Connect to Git -> pick that repo).');
       }
 
       const liveUrl = `https://${slug}.pages.dev`;
