@@ -119,7 +119,7 @@ export default {
         throw new Error('Deployment failed: ' + JSON.stringify(deployData.errors || deployData));
       }
 
-      const liveUrl = (deployData.result && deployData.result.url) || `https://${slug}.pages.dev`;
+      const liveUrl = `https://${slug}.pages.dev`;
       return new Response(JSON.stringify({ url: liveUrl }), {
         headers: { ...cors, 'Content-Type': 'application/json' }
       });
