@@ -1,28 +1,30 @@
 /**
- * PWA Forge — Deploy Worker
- * -------------------------
- * Receives generated PWA files from the Forge tool and publishes them
- * to Cloudflare Pages, returning a live *.pages.dev URL.
+ * PWA Forge — Deploy Worker (v2: Git-connected)
+ * -----------------------------------------------
+ * Receives generated PWA files from the Forge tool and publishes them by:
+ *   1. Creating a new GitHub repo (via GitHub's REST API)
+ *   2. Pushing the files into it (via GitHub's Contents API)
+ *   3. Creating a Cloudflare Pages project sourced from that repo
+ *      (Cloudflare's officially documented git-source API, not the
+ *      internal direct-upload sequence used in the previous version)
  *
- * SETUP (no CLI needed — paste this whole file into the Cloudflare dashboard):
- *   1. dash.cloudflare.com → Workers & Pages → Create → Workers → Create Worker
- *   2. Name it (e.g. "pwa-forge-deploy") → Deploy
- *   3. Edit code → delete the placeholder → paste this entire file → Save & Deploy
- *   4. Go to the Worker's Settings → Variables and Secrets → Add:
- *        CF_API_TOKEN   (Secret)  = the Pages:Edit token you created
- *        CF_ACCOUNT_ID  (Secret)  = your Cloudflare account ID
- *   5. Copy the Worker's URL (shown at the top, ends in .workers.dev) and
- *      send it back — that's the only thing that goes into the Forge page.
+ * Cloudflare then builds and deploys automatically, same as any
+ * Git-connected Pages project. First build after creation typically
+ * takes 30-90 seconds before the URL resolves.
  *
- * This uses Cloudflare's internal direct-upload sequence (the same one
- * Wrangler CLI uses under the hood: upload-token -> assets/upload ->
- * assets/upsert-hashes -> deployments). It's not the officially documented
- * simple endpoint (there isn't one) — if Cloudflare changes these internal
- * routes this may need updating, in which case the manual zip download from
- * Forge always still works as a fallback.
+ * REQUIRES, one-time, done via the dashboards (not in this file):
+ *   - The Cloudflare Pages GitHub App installed on your GitHub account
+ *     with access to "All repositories" (Workers & Pages -> Create ->
+ *     Pages -> Connect to Git -> GitHub -> Install & Authorize)
+ *   - Three Worker secrets (Settings -> Variables and Secrets):
+ *       CF_API_TOKEN   = Cloudflare API token (Account -> Pages -> Edit)
+ *       CF_ACCOUNT_ID  = your Cloudflare account ID
+ *       GITHUB_TOKEN   = a GitHub personal access token with repo-create
+ *                        permission (classic PAT, "repo" scope)
  */
 
-const API = 'https://api.cloudflare.com/client/v4';
+const CF_API = 'https://api.cloudflare.com/client/v4';
+const GH_API = 'https://api.github.com';
 
 export default {
   async fetch(request, env) {
@@ -40,8 +42,8 @@ export default {
       });
     }
 
-    if (!env.CF_API_TOKEN || !env.CF_ACCOUNT_ID) {
-      return new Response(JSON.stringify({ error: 'Worker is missing CF_API_TOKEN / CF_ACCOUNT_ID secrets' }), {
+    if (!env.CF_API_TOKEN || !env.CF_ACCOUNT_ID || !env.GITHUB_TOKEN) {
+      return new Response(JSON.stringify({ error: 'Worker is missing CF_API_TOKEN / CF_ACCOUNT_ID / GITHUB_TOKEN secrets' }), {
         status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
       });
     }
@@ -58,75 +60,61 @@ export default {
         .replace(/^-|-$/g, '')
         .slice(0, 55) || 'pwa-app';
 
-      const acct = env.CF_ACCOUNT_ID;
-      const authHeaders = { 'Authorization': `Bearer ${env.CF_API_TOKEN}`, 'Content-Type': 'application/json' };
+      const ghHeaders = {
+        'Authorization': `Bearer ${env.GITHUB_TOKEN}`,
+        'Accept': 'application/vnd.github+json',
+        'Content-Type': 'application/json',
+        'User-Agent': 'pwa-forge-deploy-worker'
+      };
 
-      // 1. Make sure the Pages project exists
-      const projCheck = await fetch(`${API}/accounts/${acct}/pages/projects/${slug}`, { headers: authHeaders });
-      if (projCheck.status === 404) {
-        const created = await fetch(`${API}/accounts/${acct}/pages/projects`, {
-          method: 'POST', headers: authHeaders,
-          body: JSON.stringify({ name: slug, production_branch: 'main' })
-        });
-        if (!created.ok) throw new Error('Could not create Pages project: ' + await created.text());
-      } else if (!projCheck.ok) {
-        throw new Error('Could not reach Pages project: ' + await projCheck.text());
-      }
+      // 1. Who are we pushing as?
+      const meRes = await fetch(`${GH_API}/user`, { headers: ghHeaders });
+      if (!meRes.ok) throw new Error('GitHub auth failed: ' + await meRes.text());
+      const owner = (await meRes.json()).login;
 
-      // 2. Hash every file, build the manifest + upload payload
-      // Cloudflare's asset store expects keys formatted as a 32-char hex
-      // digest followed by the file's extension (mirrors what Wrangler
-      // produces with blake3) — a bare hash with no suffix breaks routing
-      // at serve time even though the upload itself reports success.
-      const manifest = {};
-      const uploads = [];
+      // 2. Create the repo (auto_init so it has a default branch to push into)
+      const repoRes = await fetch(`${GH_API}/user/repos`, {
+        method: 'POST', headers: ghHeaders,
+        body: JSON.stringify({ name: slug, private: false, auto_init: true, description: 'Generated by PWA Forge' })
+      });
+      if (!repoRes.ok) throw new Error('Could not create GitHub repo: ' + await repoRes.text());
+      const branch = (await repoRes.json()).default_branch || 'main';
+
+      // 3. Push every file via the Contents API
       for (const [rawPath, b64] of Object.entries(files)) {
-        const path = rawPath.startsWith('/') ? rawPath : '/' + rawPath;
-        const bytes = base64ToBytes(b64);
-        const digest = await sha256Hex(concatBytes(bytes, new TextEncoder().encode(path)));
-        const ext = (path.match(/\.[a-zA-Z0-9]+$/) || [''])[0];
-        const hash = digest.slice(0, 32) + ext;
-        manifest[path] = hash;
-        uploads.push({ key: hash, value: b64, metadata: { contentType: contentTypeFor(path) }, base64: true });
+        const path = rawPath.replace(/^\/+/, '');
+        const putRes = await fetch(`${GH_API}/repos/${owner}/${slug}/contents/${path}`, {
+          method: 'PUT', headers: ghHeaders,
+          body: JSON.stringify({ message: `add ${path}`, content: b64, branch })
+        });
+        if (!putRes.ok) throw new Error(`Could not push ${path}: ` + await putRes.text());
       }
 
-      // 3. Get a short-lived upload token
-      const tokRes = await fetch(`${API}/accounts/${acct}/pages/projects/${slug}/upload-token`, { headers: authHeaders });
-      if (!tokRes.ok) throw new Error('Could not get upload token: ' + await tokRes.text());
-      const tokData = await tokRes.json();
-      const jwt = tokData.result.jwt;
-
-      // 4. Upload assets
-      const uploadRes = await fetch(`${API}/pages/assets/upload`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${jwt}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(uploads)
+      // 4. Create a Cloudflare Pages project sourced from that repo
+      const cfHeaders = { 'Authorization': `Bearer ${env.CF_API_TOKEN}`, 'Content-Type': 'application/json' };
+      const cfRes = await fetch(`${CF_API}/accounts/${env.CF_ACCOUNT_ID}/pages/projects`, {
+        method: 'POST', headers: cfHeaders,
+        body: JSON.stringify({
+          name: slug,
+          production_branch: branch,
+          source: {
+            type: 'github',
+            config: {
+              owner,
+              repo_name: slug,
+              production_branch: branch,
+              deployments_enabled: true
+            }
+          }
+        })
       });
-      if (!uploadRes.ok) throw new Error('Asset upload failed: ' + await uploadRes.text());
-
-      // 5. Confirm the hashes
-      const upsertRes = await fetch(`${API}/pages/assets/upsert-hashes`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${jwt}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ hashes: uploads.map(u => u.key) })
-      });
-      if (!upsertRes.ok) throw new Error('Hash confirmation failed: ' + await upsertRes.text());
-
-      // 6. Create the deployment
-      const form = new FormData();
-      form.append('manifest', JSON.stringify(manifest));
-      const deployRes = await fetch(`${API}/accounts/${acct}/pages/projects/${slug}/deployments`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` },
-        body: form
-      });
-      const deployData = await deployRes.json();
-      if (!deployRes.ok || !deployData.success) {
-        throw new Error('Deployment failed: ' + JSON.stringify(deployData.errors || deployData));
+      const cfData = await cfRes.json();
+      if (!cfRes.ok || !cfData.success) {
+        throw new Error('Cloudflare project creation failed: ' + JSON.stringify(cfData.errors || cfData));
       }
 
       const liveUrl = `https://${slug}.pages.dev`;
-      return new Response(JSON.stringify({ url: liveUrl }), {
+      return new Response(JSON.stringify({ url: liveUrl, repo: `https://github.com/${owner}/${slug}` }), {
         headers: { ...cors, 'Content-Type': 'application/json' }
       });
 
@@ -137,27 +125,3 @@ export default {
     }
   }
 };
-
-function base64ToBytes(b64) {
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return bytes;
-}
-function concatBytes(a, b) {
-  const out = new Uint8Array(a.length + b.length);
-  out.set(a, 0); out.set(b, a.length);
-  return out;
-}
-async function sha256Hex(bytes) {
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  return [...new Uint8Array(digest)].map(x => x.toString(16).padStart(2, '0')).join('');
-}
-function contentTypeFor(path) {
-  if (path.endsWith('.html')) return 'text/html';
-  if (path.endsWith('.json')) return 'application/json';
-  if (path.endsWith('.js')) return 'application/javascript';
-  if (path.endsWith('.png')) return 'image/png';
-  if (path.endsWith('.txt')) return 'text/plain';
-  return 'application/octet-stream';
-}
