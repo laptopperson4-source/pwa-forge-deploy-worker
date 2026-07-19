@@ -74,12 +74,18 @@ export default {
       }
 
       // 2. Hash every file, build the manifest + upload payload
+      // Cloudflare's asset store expects keys formatted as a 32-char hex
+      // digest followed by the file's extension (mirrors what Wrangler
+      // produces with blake3) — a bare hash with no suffix breaks routing
+      // at serve time even though the upload itself reports success.
       const manifest = {};
       const uploads = [];
       for (const [rawPath, b64] of Object.entries(files)) {
         const path = rawPath.startsWith('/') ? rawPath : '/' + rawPath;
         const bytes = base64ToBytes(b64);
-        const hash = await sha256Hex(concatBytes(bytes, new TextEncoder().encode(path)));
+        const digest = await sha256Hex(concatBytes(bytes, new TextEncoder().encode(path)));
+        const ext = (path.match(/\.[a-zA-Z0-9]+$/) || [''])[0];
+        const hash = digest.slice(0, 32) + ext;
         manifest[path] = hash;
         uploads.push({ key: hash, value: b64, metadata: { contentType: contentTypeFor(path) }, base64: true });
       }
