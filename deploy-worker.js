@@ -36,8 +36,13 @@ export default {
     if (request.method === 'OPTIONS') return new Response(null, { headers: cors });
 
     const url = new URL(request.url);
+
+    if (url.pathname === '/generate-icon' && request.method === 'POST') {
+      return handleGenerateIcon(request, env, cors);
+    }
+
     if (url.pathname !== '/deploy' || request.method !== 'POST') {
-      return new Response(JSON.stringify({ error: 'POST /deploy only' }), {
+      return new Response(JSON.stringify({ error: 'POST /deploy or POST /generate-icon only' }), {
         status: 404, headers: { ...cors, 'Content-Type': 'application/json' }
       });
     }
@@ -125,3 +130,42 @@ export default {
     }
   }
 };
+
+async function handleGenerateIcon(request, env, cors) {
+  try {
+    if (!env.AI) throw new Error('Worker is missing the Workers AI (AI) binding');
+    const { prompt } = await request.json();
+    if (!prompt || !prompt.trim()) throw new Error('A prompt is required');
+
+    const iconPrompt = `A simple, clean app icon logo of: ${prompt}. Flat vector design, centered composition, bold shapes, solid colors, no text, no watermark, no photorealism, square icon.`;
+
+    const result = await env.AI.run('@cf/black-forest-labs/flux-1-schnell', {
+      prompt: iconPrompt,
+      steps: 4
+    });
+
+    let base64;
+    if (result && typeof result === 'object' && result.image) {
+      base64 = result.image; // flux-1-schnell returns { image: base64Jpeg }
+    } else if (result instanceof Uint8Array || result instanceof ArrayBuffer) {
+      base64 = bufferToBase64(result);
+    } else {
+      throw new Error('Unexpected response shape from Workers AI');
+    }
+
+    return new Response(JSON.stringify({ image: base64 }), {
+      headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  } catch (err) {
+    return new Response(JSON.stringify({ error: err.message || String(err) }), {
+      status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+function bufferToBase64(buf) {
+  const bytes = buf instanceof ArrayBuffer ? new Uint8Array(buf) : buf;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
