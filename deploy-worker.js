@@ -39,8 +39,12 @@ export default {
       return handleGenerateIcon(request, env, cors);
     }
 
+    if (url.pathname.startsWith('/debug/') && request.method === 'GET') {
+      return handleDebug(url.pathname.slice('/debug/'.length), env, cors);
+    }
+
     if (url.pathname !== '/deploy' || request.method !== 'POST') {
-      return new Response(JSON.stringify({ error: 'POST /deploy or POST /generate-icon only' }), {
+      return new Response(JSON.stringify({ error: 'POST /deploy, POST /generate-icon, or GET /debug/<project-slug>' }), {
         status: 404, headers: { ...cors, 'Content-Type': 'application/json' }
       });
     }
@@ -142,6 +146,88 @@ export default {
     }
   }
 };
+
+async function handleDebug(rawSlug, env, cors) {
+  try {
+    if (!env.CF_API_TOKEN || !env.CF_ACCOUNT_ID) throw new Error('Worker is missing CF_API_TOKEN / CF_ACCOUNT_ID secrets');
+    const slug = rawSlug.replace(/[^a-z0-9-]/gi, '');
+    if (!slug) throw new Error('Visit /debug/<project-slug> — e.g. /debug/ytshorts-yaik6');
+
+    const headers = { 'Authorization': `Bearer ${env.CF_API_TOKEN}` };
+    const acct = env.CF_ACCOUNT_ID;
+
+    const projRes = await fetch(`${API}/accounts/${acct}/pages/projects/${slug}`, { headers });
+    const projData = await projRes.json();
+
+    const depsRes = await fetch(`${API}/accounts/${acct}/pages/projects/${slug}/deployments?per_page=5`, { headers });
+    const depsData = await depsRes.json();
+
+    let latestDetail = null;
+    if (depsData.result && depsData.result[0]) {
+      const depId = depsData.result[0].id;
+      const detailRes = await fetch(`${API}/accounts/${acct}/pages/projects/${slug}/deployments/${depId}`, { headers });
+      latestDetail = await detailRes.json();
+    }
+
+    return new Response(renderDebugHtml(slug, projData, depsData, latestDetail), {
+      headers: { ...cors, 'Content-Type': 'text/html; charset=utf-8' }
+    });
+  } catch (err) {
+    return new Response('<pre>Debug error: ' + escapeHtmlDbg(err.message || String(err)) + '</pre>', {
+      status: 500, headers: { ...cors, 'Content-Type': 'text/html; charset=utf-8' }
+    });
+  }
+}
+
+function renderDebugHtml(slug, projData, depsData, latestDetail) {
+  const proj = projData.result || {};
+  const deps = depsData.result || [];
+  const latest = latestDetail && latestDetail.result;
+
+  let stagesHtml = '<i>no stage info returned</i>';
+  if (latest && latest.stages) {
+    stagesHtml = latest.stages.map(s =>
+      `<div class="stage ${escapeHtmlDbg(s.status||'')}"><b>${escapeHtmlDbg(s.name)}</b>: ${escapeHtmlDbg(s.status)}${s.ended_on ? ' — ' + escapeHtmlDbg(s.ended_on) : ''}</div>`
+    ).join('');
+  }
+
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Debug: ${escapeHtmlDbg(slug)}</title>
+<style>
+  body{font-family:ui-monospace,monospace;background:#0a0a10;color:#eee;padding:16px;font-size:13px;line-height:1.6;}
+  h2{color:#8B5CF6;} h3{color:#22D3EE;margin-top:24px;}
+  .stage{padding:8px;margin:4px 0;border-radius:6px;background:#1a1a24;}
+  .stage.success{border-left:3px solid #34D399;}
+  .stage.failure{border-left:3px solid #FB7185;}
+  .stage.idle{border-left:3px solid #6A6A7E;}
+  .stage.active{border-left:3px solid #F59E0B;}
+  pre{white-space:pre-wrap;word-break:break-all;background:#1a1a24;padding:12px;border-radius:8px;font-size:11px;}
+  .field{margin:4px 0;} .k{color:#9A9AB0;}
+</style></head><body>
+<h2>Project: ${escapeHtmlDbg(slug)}</h2>
+<div class="field"><span class="k">Exists:</span> ${proj.id ? 'yes' : 'NO — project not found'}</div>
+<div class="field"><span class="k">Domains:</span> ${escapeHtmlDbg(JSON.stringify(proj.domains || []))}</div>
+<div class="field"><span class="k">Deployments returned:</span> ${deps.length}</div>
+
+<h3>Latest deployment</h3>
+${latest ? `
+  <div class="field"><span class="k">ID:</span> ${escapeHtmlDbg(latest.id || '')}</div>
+  <div class="field"><span class="k">Created:</span> ${escapeHtmlDbg(latest.created_on || '')}</div>
+  <div class="field"><span class="k">URL:</span> ${escapeHtmlDbg(latest.url || '')}</div>
+  <div class="field"><span class="k">Overall status:</span> ${escapeHtmlDbg((latest.latest_stage && latest.latest_stage.status) || 'unknown')}</div>
+  <h3>Stages</h3>
+  ${stagesHtml}
+` : '<i>No deployment found for this project</i>'}
+
+<h3>Raw project response</h3>
+<pre>${escapeHtmlDbg(JSON.stringify(projData, null, 2))}</pre>
+<h3>Raw deployments list</h3>
+<pre>${escapeHtmlDbg(JSON.stringify(depsData, null, 2))}</pre>
+${latestDetail ? `<h3>Raw latest deployment detail</h3><pre>${escapeHtmlDbg(JSON.stringify(latestDetail, null, 2))}</pre>` : ''}
+</body></html>`;
+}
+
+function escapeHtmlDbg(s){ return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 function base64ToBytes(b64) {
   const bin = atob(b64);
