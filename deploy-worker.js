@@ -134,6 +134,31 @@ export default {
         throw new Error('Deployment failed: ' + JSON.stringify(deployData.errors || deployData));
       }
 
+      // The response above only confirms the deployment was *queued* — the
+      // actual build/publish happens asynchronously afterward and can still
+      // fail after this point. Poll until it reaches a real final state
+      // instead of trusting success:true on the queue call alone.
+      const depId = deployData.result && deployData.result.id;
+      let finalStatus = null;
+      let finalStage = null;
+      if (depId) {
+        for (let i = 0; i < 12; i++) {
+          await new Promise(r => setTimeout(r, 2500));
+          const checkRes = await fetch(`${API}/accounts/${acct}/pages/projects/${slug}/deployments/${depId}`, { headers: authHeaders });
+          const checkData = await checkRes.json();
+          const stage = checkData.result && checkData.result.latest_stage;
+          finalStage = stage;
+          if (stage && stage.status === 'success') { finalStatus = 'success'; break; }
+          if (stage && stage.status === 'failure') { finalStatus = 'failure'; break; }
+        }
+      }
+      if (finalStatus === 'failure') {
+        throw new Error('Deployment was queued but failed during publish, at stage "' + (finalStage && finalStage.name) + '": ' + JSON.stringify(finalStage));
+      }
+      if (finalStatus !== 'success') {
+        throw new Error('Deployment queued but did not confirm success within 30s. Last known stage: ' + JSON.stringify(finalStage) + '. Check https://' + slug + '.pages.dev in a minute, or view /debug/' + slug + ' for current status.');
+      }
+
       const liveUrl = `https://${slug}.pages.dev`;
       return new Response(JSON.stringify({ url: liveUrl }), {
         headers: { ...cors, 'Content-Type': 'application/json' }
