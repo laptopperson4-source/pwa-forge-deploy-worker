@@ -172,11 +172,19 @@ export default {
   }
 };
 
+function extractSlug(raw) {
+  let s = decodeURIComponent(raw || '');
+  const m = s.match(/([a-z0-9-]+)\.pages\.dev/i);
+  if (m) return m[1].toLowerCase();
+  s = s.replace(/^https?:\/\//i, '').split('/')[0];
+  return s.replace(/[^a-z0-9-]/gi, '').toLowerCase();
+}
+
 async function handleDebug(rawSlug, env, cors) {
   try {
     if (!env.CF_API_TOKEN || !env.CF_ACCOUNT_ID) throw new Error('Worker is missing CF_API_TOKEN / CF_ACCOUNT_ID secrets');
-    const slug = rawSlug.replace(/[^a-z0-9-]/gi, '');
-    if (!slug) throw new Error('Visit /debug/<project-slug> — e.g. /debug/ytshorts-yaik6');
+    const slug = extractSlug(rawSlug);
+    if (!slug) throw new Error('Visit /debug/<project-slug> — e.g. /debug/ytshorts-yaik6 (a full pasted URL also works now)');
 
     const headers = { 'Authorization': `Bearer ${env.CF_API_TOKEN}` };
     const acct = env.CF_ACCOUNT_ID;
