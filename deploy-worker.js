@@ -111,7 +111,14 @@ export default {
         headers: { 'Authorization': `Bearer ${jwt}`, 'Content-Type': 'application/json' },
         body: JSON.stringify(uploads)
       });
-      if (!uploadRes.ok) throw new Error('Asset upload failed: ' + await uploadRes.text());
+      const uploadText = await uploadRes.text();
+      let uploadJson = null;
+      try { uploadJson = JSON.parse(uploadText); } catch (e) {}
+      if (!uploadRes.ok) throw new Error('Asset upload failed: ' + uploadText);
+      // uploadRes.ok only means the HTTP call succeeded — check the body too
+      if (uploadJson && uploadJson.success === false) {
+        throw new Error('Asset upload reported failure in response body: ' + uploadText);
+      }
 
       // 5. Confirm the hashes
       const upsertRes = await fetch(`${API}/pages/assets/upsert-hashes`, {
@@ -119,7 +126,21 @@ export default {
         headers: { 'Authorization': `Bearer ${jwt}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ hashes: uploads.map(u => u.key) })
       });
-      if (!upsertRes.ok) throw new Error('Hash confirmation failed: ' + await upsertRes.text());
+      const upsertText = await upsertRes.text();
+      let upsertJson = null;
+      try { upsertJson = JSON.parse(upsertText); } catch (e) {}
+      if (!upsertRes.ok) throw new Error('Hash confirmation failed: ' + upsertText);
+      if (upsertJson && upsertJson.success === false) {
+        throw new Error('Hash confirmation reported failure in response body: ' + upsertText);
+      }
+
+      const uploadDebug = {
+        filesInManifest: Object.keys(manifest).length,
+        uploadHttpOk: uploadRes.ok,
+        uploadBody: uploadJson || uploadText.slice(0, 300),
+        upsertHttpOk: upsertRes.ok,
+        upsertBody: upsertJson || upsertText.slice(0, 300)
+      };
 
       // 6. Create the deployment
       const form = new FormData();
@@ -160,7 +181,7 @@ export default {
       }
 
       const liveUrl = `https://${slug}.pages.dev`;
-      return new Response(JSON.stringify({ url: liveUrl }), {
+      return new Response(JSON.stringify({ url: liveUrl, debug: uploadDebug }), {
         headers: { ...cors, 'Content-Type': 'application/json' }
       });
 
