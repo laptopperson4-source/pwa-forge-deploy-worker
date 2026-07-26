@@ -1,25 +1,37 @@
 /**
- * PWA Forge — Deploy Worker
- * -------------------------
- * Receives generated PWA files from the Forge tool and publishes them
- * to Cloudflare Pages, returning a live *.pages.dev URL.
+ * PWA Forge — Deploy Worker (v3: Workers static-assets, officially documented)
+ * -----------------------------------------------------------------------------
+ * Receives generated PWA files from the Forge tool and publishes them as a
+ * Cloudflare Worker with static assets, returning a live *.workers.dev URL.
+ *
+ * This replaces two earlier approaches that both failed in ways that only
+ * showed up after reporting success:
+ *   v1 — Pages' internal direct-upload sequence (reverse-engineered from a
+ *        blog post). Hash format was wrong; later fixed, but deployments
+ *        still silently failed to actually serve their uploaded bytes.
+ *   v2 — Pages projects Git-connected to a freshly-created GitHub repo.
+ *        Hit a real Cloudflare-side bug where project creation reports
+ *        success while never actually attaching the GitHub source.
+ *   v3 (this version) — Cloudflare's officially documented Workers static
+ *        assets direct-upload flow: https://developers.cloudflare.com/workers/static-assets/direct-upload/
+ *        Every endpoint here is long-stable/documented, and the hash
+ *        formula (sha256(base64(bytes) + ext).slice(0,32), used as-is,
+ *        no suffix) is taken directly from Cloudflare's own reference
+ *        implementation rather than guessed.
  *
  * SETUP (no CLI needed — paste this whole file into the Cloudflare dashboard):
  *   1. dash.cloudflare.com → Workers & Pages → Create → Workers → Create Worker
  *   2. Name it (e.g. "pwa-forge-deploy") → Deploy
  *   3. Edit code → delete the placeholder → paste this entire file → Save & Deploy
  *   4. Go to the Worker's Settings → Variables and Secrets → Add:
- *        CF_API_TOKEN   (Secret)  = the Pages:Edit token you created
+ *        CF_API_TOKEN   (Secret)  = a token with Workers Scripts:Edit permission
  *        CF_ACCOUNT_ID  (Secret)  = your Cloudflare account ID
  *   5. Copy the Worker's URL (shown at the top, ends in .workers.dev) and
  *      send it back — that's the only thing that goes into the Forge page.
  *
- * This uses Cloudflare's internal direct-upload sequence (the same one
- * Wrangler CLI uses under the hood: upload-token -> assets/upload ->
- * assets/upsert-hashes -> deployments). It's not the officially documented
- * simple endpoint (there isn't one) — if Cloudflare changes these internal
- * routes this may need updating, in which case the manual zip download from
- * Forge always still works as a fallback.
+ * NOTE: the CF_API_TOKEN needs "Workers Scripts: Edit" permission (not just
+ * "Pages: Edit" from earlier versions) — if deploys start failing with an
+ * auth/permission error after upgrading to this version, that's why.
  */
 
 const API = 'https://api.cloudflare.com/client/v4';
@@ -70,118 +82,102 @@ export default {
       const acct = env.CF_ACCOUNT_ID;
       const authHeaders = { 'Authorization': `Bearer ${env.CF_API_TOKEN}`, 'Content-Type': 'application/json' };
 
-      // 1. Make sure the Pages project exists
-      const projCheck = await fetch(`${API}/accounts/${acct}/pages/projects/${slug}`, { headers: authHeaders });
-      if (projCheck.status === 404) {
-        const created = await fetch(`${API}/accounts/${acct}/pages/projects`, {
-          method: 'POST', headers: authHeaders,
-          body: JSON.stringify({ name: slug, production_branch: 'main' })
-        });
-        if (!created.ok) throw new Error('Could not create Pages project: ' + await created.text());
-      } else if (!projCheck.ok) {
-        throw new Error('Could not reach Pages project: ' + await projCheck.text());
-      }
-
-      // 2. Hash every file, build the manifest + upload payload
-      // Cloudflare's asset store expects keys formatted as a 32-char hex
-      // digest followed by the file's extension (mirrors what Wrangler
-      // produces with blake3) — a bare hash with no suffix breaks routing
-      // at serve time even though the upload itself reports success.
+      // 1. Build the manifest using Cloudflare's documented formula:
+      //    hash = sha256( base64(fileBytes) + extensionWithoutDot ), first 32 hex chars.
+      //    (Confirmed against Cloudflare's own reference implementation —
+      //    this differs from what earlier versions of this Worker guessed.)
       const manifest = {};
-      const uploads = [];
+      const contentByHash = {};
       for (const [rawPath, b64] of Object.entries(files)) {
         const path = rawPath.startsWith('/') ? rawPath : '/' + rawPath;
+        const ext = (path.match(/\.([a-zA-Z0-9]+)$/) || ['', ''])[1];
+        const hash = (await sha256HexOfString(b64 + ext)).slice(0, 32);
         const bytes = base64ToBytes(b64);
-        const digest = await sha256Hex(concatBytes(bytes, new TextEncoder().encode(path)));
-        const ext = (path.match(/\.[a-zA-Z0-9]+$/) || [''])[0];
-        const hash = digest.slice(0, 32) + ext;
-        manifest[path] = hash;
-        uploads.push({ key: hash, value: b64, metadata: { contentType: contentTypeFor(path) }, base64: true });
+        manifest[path] = { hash, size: bytes.length };
+        contentByHash[hash] = { b64, contentType: contentTypeFor(path) };
       }
 
-      // 3. Get a short-lived upload token
-      const tokRes = await fetch(`${API}/accounts/${acct}/pages/projects/${slug}/upload-token`, { headers: authHeaders });
-      if (!tokRes.ok) throw new Error('Could not get upload token: ' + await tokRes.text());
-      const tokData = await tokRes.json();
-      const jwt = tokData.result.jwt;
-
-      // 4. Upload assets
-      const uploadRes = await fetch(`${API}/pages/assets/upload`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${jwt}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(uploads)
+      // 2. Open an asset upload session
+      const sessionRes = await fetch(`${API}/accounts/${acct}/workers/scripts/${slug}/assets-upload-session`, {
+        method: 'POST', headers: authHeaders,
+        body: JSON.stringify({ manifest })
       });
-      const uploadText = await uploadRes.text();
-      let uploadJson = null;
-      try { uploadJson = JSON.parse(uploadText); } catch (e) {}
-      if (!uploadRes.ok) throw new Error('Asset upload failed: ' + uploadText);
-      // uploadRes.ok only means the HTTP call succeeded — check the body too
-      if (uploadJson && uploadJson.success === false) {
-        throw new Error('Asset upload reported failure in response body: ' + uploadText);
+      const sessionText = await sessionRes.text();
+      let sessionData; try { sessionData = JSON.parse(sessionText); } catch (e) {}
+      if (!sessionRes.ok || !sessionData || !sessionData.success) {
+        throw new Error('Could not open asset upload session: ' + sessionText);
       }
 
-      // 5. Confirm the hashes
-      const upsertRes = await fetch(`${API}/pages/assets/upsert-hashes`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${jwt}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ hashes: uploads.map(u => u.key) })
-      });
-      const upsertText = await upsertRes.text();
-      let upsertJson = null;
-      try { upsertJson = JSON.parse(upsertText); } catch (e) {}
-      if (!upsertRes.ok) throw new Error('Hash confirmation failed: ' + upsertText);
-      if (upsertJson && upsertJson.success === false) {
-        throw new Error('Hash confirmation reported failure in response body: ' + upsertText);
-      }
+      let completionJwt = sessionData.result.jwt;
+      const buckets = sessionData.result.buckets || [];
 
-      const uploadDebug = {
-        filesInManifest: Object.keys(manifest).length,
-        uploadHttpOk: uploadRes.ok,
-        uploadBody: uploadJson || uploadText.slice(0, 300),
-        upsertHttpOk: upsertRes.ok,
-        upsertBody: upsertJson || upsertText.slice(0, 300)
-      };
-
-      // 6. Create the deployment
-      const form = new FormData();
-      form.append('manifest', JSON.stringify(manifest));
-      const deployRes = await fetch(`${API}/accounts/${acct}/pages/projects/${slug}/deployments`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` },
-        body: form
-      });
-      const deployData = await deployRes.json();
-      if (!deployRes.ok || !deployData.success) {
-        throw new Error('Deployment failed: ' + JSON.stringify(deployData.errors || deployData));
-      }
-
-      // The response above only confirms the deployment was *queued* — the
-      // actual build/publish happens asynchronously afterward and can still
-      // fail after this point. Poll until it reaches a real final state
-      // instead of trusting success:true on the queue call alone.
-      const depId = deployData.result && deployData.result.id;
-      let finalStatus = null;
-      let finalStage = null;
-      if (depId) {
-        for (let i = 0; i < 12; i++) {
-          await new Promise(r => setTimeout(r, 2500));
-          const checkRes = await fetch(`${API}/accounts/${acct}/pages/projects/${slug}/deployments/${depId}`, { headers: authHeaders });
-          const checkData = await checkRes.json();
-          const stage = checkData.result && checkData.result.latest_stage;
-          finalStage = stage;
-          if (stage && stage.status === 'success') { finalStatus = 'success'; break; }
-          if (stage && stage.status === 'failure') { finalStatus = 'failure'; break; }
+      // 3. Upload each bucket of (new/changed) files as multipart/form-data —
+      // every file part carries its real Content-Type so it serves correctly.
+      for (const bucket of buckets) {
+        const form = new FormData();
+        for (const hash of bucket) {
+          const entry = contentByHash[hash];
+          if (!entry) throw new Error('Upload session asked for a hash we did not send: ' + hash);
+          form.append(hash, new Blob([entry.b64], { type: entry.contentType }), hash);
         }
-      }
-      if (finalStatus === 'failure') {
-        throw new Error('Deployment was queued but failed during publish, at stage "' + (finalStage && finalStage.name) + '": ' + JSON.stringify(finalStage));
-      }
-      if (finalStatus !== 'success') {
-        throw new Error('Deployment queued but did not confirm success within 30s. Last known stage: ' + JSON.stringify(finalStage) + '. Check https://' + slug + '.pages.dev in a minute, or view /debug/' + slug + ' for current status.');
+        const upRes = await fetch(`${API}/accounts/${acct}/workers/assets/upload?base64=true`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${completionJwt}` },
+          body: form
+        });
+        const upText = await upRes.text();
+        let upData; try { upData = JSON.parse(upText); } catch (e) {}
+        if (!upRes.ok || !upData || !upData.success) {
+          throw new Error('Asset bucket upload failed: ' + upText);
+        }
+        if (upData.result && upData.result.jwt) completionJwt = upData.result.jwt;
       }
 
-      const liveUrl = `https://${slug}.pages.dev`;
-      return new Response(JSON.stringify({ url: liveUrl, debug: uploadDebug }), {
+      // 4. Deploy the script: a tiny router that always serves from the
+      // ASSETS binding, plus the completion JWT that finalizes the assets
+      // we just uploaded.
+      const workerScript = `export default { async fetch(request, env) { return env.ASSETS.fetch(request); } };`;
+      const metadata = {
+        main_module: 'worker.js',
+        compatibility_date: '2026-07-25',
+        assets: { jwt: completionJwt, config: { html_handling: 'auto-trailing-slash' } },
+        bindings: [{ type: 'assets', name: 'ASSETS' }]
+      };
+      const deployForm = new FormData();
+      deployForm.append('metadata', JSON.stringify(metadata));
+      deployForm.append('worker.js', new Blob([workerScript], { type: 'application/javascript+module' }), 'worker.js');
+
+      const putRes = await fetch(`${API}/accounts/${acct}/workers/scripts/${slug}`, {
+        method: 'PUT',
+        headers: { 'Authorization': `Bearer ${env.CF_API_TOKEN}` },
+        body: deployForm
+      });
+      const putText = await putRes.text();
+      let putData; try { putData = JSON.parse(putText); } catch (e) {}
+      if (!putRes.ok || !putData || !putData.success) {
+        throw new Error('Script deployment failed: ' + putText);
+      }
+
+      // 5. Make sure it's reachable on the account's workers.dev subdomain
+      const subRes = await fetch(`${API}/accounts/${acct}/workers/scripts/${slug}/subdomain`, {
+        method: 'POST', headers: authHeaders,
+        body: JSON.stringify({ enabled: true })
+      });
+      if (!subRes.ok) {
+        throw new Error('Deployed, but could not enable workers.dev route: ' + await subRes.text());
+      }
+
+      // 6. Get the account's workers.dev subdomain to build the final URL
+      const subdomainRes = await fetch(`${API}/accounts/${acct}/workers/subdomain`, { headers: authHeaders });
+      const subdomainData = await subdomainRes.json();
+      const accountSubdomain = subdomainData.result && subdomainData.result.subdomain;
+      if (!accountSubdomain) throw new Error('Deployed, but could not determine the workers.dev subdomain to build the URL.');
+
+      const liveUrl = `https://${slug}.${accountSubdomain}.workers.dev`;
+      return new Response(JSON.stringify({
+        url: liveUrl,
+        debug: { filesInManifest: Object.keys(manifest).length, bucketsUploaded: buckets.length }
+      }), {
         headers: { ...cors, 'Content-Type': 'application/json' }
       });
 
@@ -205,25 +201,22 @@ async function handleDebug(rawSlug, env, cors) {
   try {
     if (!env.CF_API_TOKEN || !env.CF_ACCOUNT_ID) throw new Error('Worker is missing CF_API_TOKEN / CF_ACCOUNT_ID secrets');
     const slug = extractSlug(rawSlug);
-    if (!slug) throw new Error('Visit /debug/<project-slug> — e.g. /debug/ytshorts-yaik6 (a full pasted URL also works now)');
+    if (!slug) throw new Error('Visit /debug/<script-slug> — e.g. /debug/ytshorts-yaik6 (a full pasted URL also works too)');
 
     const headers = { 'Authorization': `Bearer ${env.CF_API_TOKEN}` };
     const acct = env.CF_ACCOUNT_ID;
 
-    const projRes = await fetch(`${API}/accounts/${acct}/pages/projects/${slug}`, { headers });
-    const projData = await projRes.json();
+    const listRes = await fetch(`${API}/accounts/${acct}/workers/scripts`, { headers });
+    const listData = await listRes.json();
+    const scriptEntry = listData.result && listData.result.find(s => s.id === slug);
 
-    const depsRes = await fetch(`${API}/accounts/${acct}/pages/projects/${slug}/deployments?per_page=5`, { headers });
-    const depsData = await depsRes.json();
+    const subRes = await fetch(`${API}/accounts/${acct}/workers/scripts/${slug}/subdomain`, { headers });
+    const subData = await subRes.json();
 
-    let latestDetail = null;
-    if (depsData.result && depsData.result[0]) {
-      const depId = depsData.result[0].id;
-      const detailRes = await fetch(`${API}/accounts/${acct}/pages/projects/${slug}/deployments/${depId}`, { headers });
-      latestDetail = await detailRes.json();
-    }
+    const acctSubRes = await fetch(`${API}/accounts/${acct}/workers/subdomain`, { headers });
+    const acctSubData = await acctSubRes.json();
 
-    return new Response(renderDebugHtml(slug, projData, depsData, latestDetail), {
+    return new Response(renderDebugHtml(slug, scriptEntry, listData, subData, acctSubData), {
       headers: { ...cors, 'Content-Type': 'text/html; charset=utf-8' }
     });
   } catch (err) {
@@ -233,51 +226,32 @@ async function handleDebug(rawSlug, env, cors) {
   }
 }
 
-function renderDebugHtml(slug, projData, depsData, latestDetail) {
-  const proj = projData.result || {};
-  const deps = depsData.result || [];
-  const latest = latestDetail && latestDetail.result;
-
-  let stagesHtml = '<i>no stage info returned</i>';
-  if (latest && latest.stages) {
-    stagesHtml = latest.stages.map(s =>
-      `<div class="stage ${escapeHtmlDbg(s.status||'')}"><b>${escapeHtmlDbg(s.name)}</b>: ${escapeHtmlDbg(s.status)}${s.ended_on ? ' — ' + escapeHtmlDbg(s.ended_on) : ''}</div>`
-    ).join('');
-  }
+function renderDebugHtml(slug, scriptEntry, listData, subData, acctSubData) {
+  const accountSubdomain = acctSubData.result && acctSubData.result.subdomain;
+  const liveUrl = accountSubdomain ? `https://${slug}.${accountSubdomain}.workers.dev` : null;
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Debug: ${escapeHtmlDbg(slug)}</title>
 <style>
   body{font-family:ui-monospace,monospace;background:#0a0a10;color:#eee;padding:16px;font-size:13px;line-height:1.6;}
   h2{color:#8B5CF6;} h3{color:#22D3EE;margin-top:24px;}
-  .stage{padding:8px;margin:4px 0;border-radius:6px;background:#1a1a24;}
-  .stage.success{border-left:3px solid #34D399;}
-  .stage.failure{border-left:3px solid #FB7185;}
-  .stage.idle{border-left:3px solid #6A6A7E;}
-  .stage.active{border-left:3px solid #F59E0B;}
   pre{white-space:pre-wrap;word-break:break-all;background:#1a1a24;padding:12px;border-radius:8px;font-size:11px;}
   .field{margin:4px 0;} .k{color:#9A9AB0;}
+  a{color:#22D3EE;}
 </style></head><body>
-<h2>Project: ${escapeHtmlDbg(slug)}</h2>
-<div class="field"><span class="k">Exists:</span> ${proj.id ? 'yes' : 'NO — project not found'}</div>
-<div class="field"><span class="k">Domains:</span> ${escapeHtmlDbg(JSON.stringify(proj.domains || []))}</div>
-<div class="field"><span class="k">Deployments returned:</span> ${deps.length}</div>
+<h2>Script: ${escapeHtmlDbg(slug)}</h2>
+<div class="field"><span class="k">Exists:</span> ${scriptEntry ? 'yes' : 'NO — not found in this account\'s script list'}</div>
+<div class="field"><span class="k">Modified:</span> ${escapeHtmlDbg(scriptEntry && scriptEntry.modified_on)}</div>
+<div class="field"><span class="k">Account subdomain:</span> ${escapeHtmlDbg(accountSubdomain || 'not found')}</div>
+<div class="field"><span class="k">Expected live URL:</span> ${liveUrl ? `<a href="${liveUrl}">${escapeHtmlDbg(liveUrl)}</a>` : 'unknown'}</div>
+<div class="field"><span class="k">workers.dev route enabled:</span> ${escapeHtmlDbg(JSON.stringify(subData.result))}</div>
 
-<h3>Latest deployment</h3>
-${latest ? `
-  <div class="field"><span class="k">ID:</span> ${escapeHtmlDbg(latest.id || '')}</div>
-  <div class="field"><span class="k">Created:</span> ${escapeHtmlDbg(latest.created_on || '')}</div>
-  <div class="field"><span class="k">URL:</span> ${escapeHtmlDbg(latest.url || '')}</div>
-  <div class="field"><span class="k">Overall status:</span> ${escapeHtmlDbg((latest.latest_stage && latest.latest_stage.status) || 'unknown')}</div>
-  <h3>Stages</h3>
-  ${stagesHtml}
-` : '<i>No deployment found for this project</i>'}
-
-<h3>Raw project response</h3>
-<pre>${escapeHtmlDbg(JSON.stringify(projData, null, 2))}</pre>
-<h3>Raw deployments list</h3>
-<pre>${escapeHtmlDbg(JSON.stringify(depsData, null, 2))}</pre>
-${latestDetail ? `<h3>Raw latest deployment detail</h3><pre>${escapeHtmlDbg(JSON.stringify(latestDetail, null, 2))}</pre>` : ''}
+<h3>Raw script list entry</h3>
+<pre>${escapeHtmlDbg(JSON.stringify(scriptEntry, null, 2))}</pre>
+<h3>Raw subdomain-route response</h3>
+<pre>${escapeHtmlDbg(JSON.stringify(subData, null, 2))}</pre>
+<h3>Raw account subdomain response</h3>
+<pre>${escapeHtmlDbg(JSON.stringify(acctSubData, null, 2))}</pre>
 </body></html>`;
 }
 
@@ -289,10 +263,9 @@ function base64ToBytes(b64) {
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   return bytes;
 }
-function concatBytes(a, b) {
-  const out = new Uint8Array(a.length + b.length);
-  out.set(a, 0); out.set(b, a.length);
-  return out;
+async function sha256HexOfString(str) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return [...new Uint8Array(digest)].map(x => x.toString(16).padStart(2, '0')).join('');
 }
 async function sha256Hex(bytes) {
   const digest = await crypto.subtle.digest('SHA-256', bytes);
