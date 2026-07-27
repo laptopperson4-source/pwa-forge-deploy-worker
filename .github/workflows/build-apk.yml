@@ -1,0 +1,90 @@
+name: Build TWA APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      site_host:
+        description: 'Bare host of the site, e.g. example.com'
+        required: true
+      manifest_url:
+        description: 'Full URL to the PWA manifest.json'
+        required: true
+      icon_url:
+        description: 'Full URL to a >=512x512 PNG icon'
+        required: true
+      app_name:
+        description: 'App display name'
+        required: true
+      package_id:
+        description: 'Android package id, e.g. app.pwaforge.abc123 (no hyphens)'
+        required: true
+      theme_color:
+        description: 'Theme color hex, e.g. #0B0B0B'
+        required: false
+        default: '#0B0B0B'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare project directory
+        run: mkdir -p ${{ github.workspace }}/project
+
+      - name: Write twa-manifest.json
+        run: |
+          cat > ${{ github.workspace }}/project/twa-manifest.json << EOF
+          {
+            "packageId": "${{ inputs.package_id }}",
+            "host": "${{ inputs.site_host }}",
+            "name": "${{ inputs.app_name }}",
+            "launcherName": "${{ inputs.app_name }}",
+            "display": "standalone",
+            "themeColor": "${{ inputs.theme_color }}",
+            "themeColorDark": "${{ inputs.theme_color }}",
+            "navigationColor": "${{ inputs.theme_color }}",
+            "navigationColorDark": "${{ inputs.theme_color }}",
+            "backgroundColor": "#FFFFFF",
+            "enableNotifications": false,
+            "startUrl": "/",
+            "iconUrl": "${{ inputs.icon_url }}",
+            "maskableIconUrl": "${{ inputs.icon_url }}",
+            "splashScreenFadeOutDuration": 300,
+            "signingKey": { "path": "/project/release.keystore", "alias": "pwaforge" },
+            "appVersion": "1.0.0",
+            "appVersionCode": 1,
+            "webManifestUrl": "${{ inputs.manifest_url }}"
+          }
+          EOF
+          cat ${{ github.workspace }}/project/twa-manifest.json
+
+      - name: Generate signing key + build signed APK
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}/project:/project \
+            -w /project \
+            -e BUBBLEWRAP_KEYSTORE_PASSWORD=pwaforgeTempPass1 \
+            -e BUBBLEWRAP_KEY_PASSWORD=pwaforgeTempPass1 \
+            ghcr.io/googlechromelabs/bubblewrap:latest \
+            /bin/bash -c "
+              set -e
+              keytool -genkeypair -v -keystore /project/release.keystore -alias pwaforge \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -storepass \$BUBBLEWRAP_KEYSTORE_PASSWORD -keypass \$BUBBLEWRAP_KEY_PASSWORD \
+                -dname 'CN=PWA Forge,OU=NexaPulse,O=NexaPulse,L=Lagos,S=Lagos,C=NG'
+              bubblewrap build --skipPwaValidation
+            "
+
+      - name: Rename output artifact
+        run: |
+          cd ${{ github.workspace }}/project
+          ls -la
+          cp app-release-signed.apk "${{ inputs.app_name }}.apk"
+
+      - name: Create GitHub Release with the APK attached
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-${{ github.run_id }}
+          name: "${{ inputs.app_name }} APK"
+          files: ${{ github.workspace }}/project/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
