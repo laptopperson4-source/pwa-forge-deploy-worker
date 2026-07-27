@@ -83,25 +83,39 @@ jobs:
             -c 'keytool -genkeypair -v -keystore /project/release.keystore -alias pwaforge -keyalg RSA -keysize 2048 -validity 10000 -storepass "$BUBBLEWRAP_KEYSTORE_PASSWORD" -keypass "$BUBBLEWRAP_KEY_PASSWORD" -dname "CN=PWA Forge,OU=NexaPulse,O=NexaPulse,L=Lagos,S=Lagos,C=NG"'
           ls -la ${{ github.workspace }}/project/
 
-      - name: Diagnostic 5 - bubblewrap build
+      - name: Diagnostic 5 - bubblewrap build and locate output
         run: |
           docker run --rm \
+            --entrypoint=/bin/bash \
             -v ${{ github.workspace }}/project:/project \
             -w /project \
             -e BUBBLEWRAP_KEYSTORE_PASSWORD=pwaforgeTempPass1 \
             -e BUBBLEWRAP_KEY_PASSWORD=pwaforgeTempPass1 \
             ghcr.io/googlechromelabs/bubblewrap:latest \
-            build --skipPwaValidation
-          ls -la ${{ github.workspace }}/project/
+            -c '
+              set -x
+              bubblewrap build --skipPwaValidation
+              echo "BUILD_EXIT=$?"
+              echo "--- searching entire container fs for apk/aab ---"
+              find / -xdev \( -name "*.apk" -o -name "*.aab" \) 2>/dev/null
+              find / \( -name "*.apk" -o -name "*.aab" \) 2>/dev/null | while read f; do
+                cp "$f" "/project/found-$(basename "$f")"
+                echo "copied: $f"
+              done
+              echo "--- /project contents now ---"
+              ls -la /project
+            '
+          echo "--- host-side project dir after container exit ---"
+          find ${{ github.workspace }}/project -type f
 
       - name: Locate and rename output artifact
         run: |
           cd ${{ github.workspace }}/project
           echo "--- all files in project dir ---"
-          find . -maxdepth 4 -type f | head -50
-          echo "--- apk/aab files specifically ---"
-          find . -name "*.apk" -o -name "*.aab"
-          APK_PATH=$(find . -name "*-signed.apk" | head -1)
+          find . -maxdepth 6 -type f
+          APK_PATH=$(find . -name "found-*-signed.apk" | head -1)
+          if [ -z "$APK_PATH" ]; then APK_PATH=$(find . -name "found-*.apk" | head -1); fi
+          if [ -z "$APK_PATH" ]; then APK_PATH=$(find . -name "*-signed.apk" | head -1); fi
           if [ -z "$APK_PATH" ]; then APK_PATH=$(find . -name "*.apk" | head -1); fi
           echo "Using: $APK_PATH"
           cp "$APK_PATH" "${{ inputs.app_name }}.apk"
