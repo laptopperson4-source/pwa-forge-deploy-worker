@@ -94,10 +94,17 @@ jobs:
             build --skipPwaValidation
           ls -la ${{ github.workspace }}/project/
 
-      - name: Rename output artifact
+      - name: Locate and rename output artifact
         run: |
           cd ${{ github.workspace }}/project
-          cp app-release-signed.apk "${{ inputs.app_name }}.apk"
+          echo "--- all files in project dir ---"
+          find . -maxdepth 4 -type f | head -50
+          echo "--- apk/aab files specifically ---"
+          find . -name "*.apk" -o -name "*.aab"
+          APK_PATH=$(find . -name "*-signed.apk" | head -1)
+          if [ -z "$APK_PATH" ]; then APK_PATH=$(find . -name "*.apk" | head -1); fi
+          echo "Using: $APK_PATH"
+          cp "$APK_PATH" "${{ inputs.app_name }}.apk"
 
       - name: Create GitHub Release with the APK attached
         uses: softprops/action-gh-release@v2
