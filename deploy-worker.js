@@ -26,6 +26,11 @@
  *   4. Go to the Worker's Settings → Variables and Secrets → Add:
  *        CF_API_TOKEN   (Secret)  = a token with Workers Scripts:Edit permission
  *        CF_ACCOUNT_ID  (Secret)  = your Cloudflare account ID
+ *        GROQ_API_KEY   (Secret)  = free key from console.groq.com — used for
+ *                                   /generate-icon (LLM writes real SVG icon
+ *                                   markup, not a raster image, so it's never
+ *                                   blurry and isn't limited to a fixed shape
+ *                                   library like the old template engine)
  *   5. Copy the Worker's URL (shown at the top, ends in .workers.dev) and
  *      send it back — that's the only thing that goes into the Forge page.
  *
@@ -282,27 +287,50 @@ function contentTypeFor(path) {
 
 async function handleGenerateIcon(request, env, cors) {
   try {
-    if (!env.AI) throw new Error('Worker is missing the Workers AI (AI) binding');
+    if (!env.GROQ_API_KEY) throw new Error('Worker is missing the GROQ_API_KEY secret');
     const { prompt } = await request.json();
     if (!prompt || !prompt.trim()) throw new Error('A prompt is required');
 
-    const iconPrompt = `A simple, clean app icon logo of: ${prompt}. Flat vector design, centered composition, bold shapes, solid colors, no text, no watermark, no photorealism, square icon.`;
+    const systemPrompt = `You are an expert icon and logo designer. Given a short description, output ONLY a complete, valid, self-contained SVG for a polished, modern flat-design app icon.
 
-    const result = await env.AI.run('@cf/black-forest-labs/flux-1-schnell', {
-      prompt: iconPrompt,
-      steps: 4
+Rules:
+- Root element: <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+- Fill the entire 100x100 square with a background shape (rounded rect, corner radius 18-22) using a smooth 2-stop linear gradient defined in <defs>, based on colors mentioned in the description (pick tasteful, harmonious colors if none are given).
+- Draw the subject as a small number of GEOMETRICALLY UNIFIED compound shapes (<path> with curves/arcs preferred) that read as one cohesive icon — not a pile of disconnected circles/rectangles that look like separate stickers stuck together. Parts that belong to the same object must visually connect or overlap cleanly.
+- Use 2-4 total colors, harmonious with the background.
+- No text, no raster images, no external fonts/CSS, no <script>, no comments.
+- Centered composition with sensible padding (roughly 10-15 units from each edge).
+- Output RAW SVG ONLY — no markdown code fences, no explanation, nothing before "<svg" or after "</svg>".`;
+
+    const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'llama-3.1-70b-versatile',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: `Icon description: ${prompt}` }
+        ],
+        temperature: 0.6,
+        max_tokens: 1800
+      })
     });
+    const groqText = await groqRes.text();
+    let groqData; try { groqData = JSON.parse(groqText); } catch (e) {}
+    if (!groqRes.ok || !groqData) throw new Error('Groq request failed: ' + groqText.slice(0, 400));
 
-    let base64;
-    if (result && typeof result === 'object' && result.image) {
-      base64 = result.image; // flux-1-schnell returns { image: base64Jpeg }
-    } else if (result instanceof Uint8Array || result instanceof ArrayBuffer) {
-      base64 = bufferToBase64(result);
-    } else {
-      throw new Error('Unexpected response shape from Workers AI');
-    }
+    let raw = (groqData.choices && groqData.choices[0] && groqData.choices[0].message && groqData.choices[0].message.content) || '';
+    // Strip markdown fences if the model added them despite instructions
+    raw = raw.replace(/```(?:svg|xml)?/gi, '').trim();
+    const start = raw.indexOf('<svg');
+    const end = raw.lastIndexOf('</svg>');
+    if (start === -1 || end === -1) throw new Error('Model did not return valid SVG: ' + raw.slice(0, 200));
+    let svg = raw.slice(start, end + '</svg>'.length);
 
-    return new Response(JSON.stringify({ image: base64 }), {
+    // Defense in depth: strip anything executable even though the prompt forbids it
+    svg = svg.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/\son\w+\s*=\s*"[^"]*"/gi, '').replace(/\son\w+\s*=\s*'[^']*'/gi, '');
+
+    return new Response(JSON.stringify({ svg }), {
       headers: { ...cors, 'Content-Type': 'application/json' }
     });
   } catch (err) {
@@ -310,11 +338,4 @@ async function handleGenerateIcon(request, env, cors) {
       status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
     });
   }
-}
-
-function bufferToBase64(buf) {
-  const bytes = buf instanceof ArrayBuffer ? new Uint8Array(buf) : buf;
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-  return btoa(binary);
 }
