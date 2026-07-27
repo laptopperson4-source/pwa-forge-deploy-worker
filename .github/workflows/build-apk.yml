@@ -65,21 +65,22 @@ jobs:
 
       - name: Diagnostic 2 - verify tools inside the image
         run: |
-          docker run --rm ghcr.io/googlechromelabs/bubblewrap:latest bash -c "whoami && which keytool && which bubblewrap && bubblewrap --version"
+          docker run --rm --entrypoint=/bin/bash ghcr.io/googlechromelabs/bubblewrap:latest -c "whoami && which keytool && which bubblewrap && bubblewrap --version"
 
       - name: Diagnostic 3 - verify bind-mount write access
         run: |
-          docker run --rm -v ${{ github.workspace }}/project:/project ghcr.io/googlechromelabs/bubblewrap:latest bash -c "touch /project/write-test.txt && echo wrote-ok"
+          docker run --rm --entrypoint=/bin/bash -v ${{ github.workspace }}/project:/project ghcr.io/googlechromelabs/bubblewrap:latest -c "touch /project/write-test.txt && echo wrote-ok"
           ls -la ${{ github.workspace }}/project/
 
       - name: Diagnostic 4 - generate signing keystore
         run: |
           docker run --rm \
+            --entrypoint=/bin/bash \
             -v ${{ github.workspace }}/project:/project \
             -e BUBBLEWRAP_KEYSTORE_PASSWORD=pwaforgeTempPass1 \
             -e BUBBLEWRAP_KEY_PASSWORD=pwaforgeTempPass1 \
             ghcr.io/googlechromelabs/bubblewrap:latest \
-            bash -c 'keytool -genkeypair -v -keystore /project/release.keystore -alias pwaforge -keyalg RSA -keysize 2048 -validity 10000 -storepass "$BUBBLEWRAP_KEYSTORE_PASSWORD" -keypass "$BUBBLEWRAP_KEY_PASSWORD" -dname "CN=PWA Forge,OU=NexaPulse,O=NexaPulse,L=Lagos,S=Lagos,C=NG"'
+            -c 'keytool -genkeypair -v -keystore /project/release.keystore -alias pwaforge -keyalg RSA -keysize 2048 -validity 10000 -storepass "$BUBBLEWRAP_KEYSTORE_PASSWORD" -keypass "$BUBBLEWRAP_KEY_PASSWORD" -dname "CN=PWA Forge,OU=NexaPulse,O=NexaPulse,L=Lagos,S=Lagos,C=NG"'
           ls -la ${{ github.workspace }}/project/
 
       - name: Diagnostic 5 - bubblewrap build
@@ -90,7 +91,7 @@ jobs:
             -e BUBBLEWRAP_KEYSTORE_PASSWORD=pwaforgeTempPass1 \
             -e BUBBLEWRAP_KEY_PASSWORD=pwaforgeTempPass1 \
             ghcr.io/googlechromelabs/bubblewrap:latest \
-            bash -c 'bubblewrap build --skipPwaValidation'
+            build --skipPwaValidation
           ls -la ${{ github.workspace }}/project/
 
       - name: Rename output artifact
