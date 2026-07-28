@@ -113,7 +113,8 @@ jobs:
       - name: Publish captured build log (so it's readable outside the Actions log UI)
         if: always()
         run: |
-          B64=$(base64 -w0 ${{ github.workspace }}/project/build-output.txt)
+          tail -c 100000 ${{ github.workspace }}/project/build-output.txt > ${{ github.workspace }}/project/build-output-tail.txt
+          B64=$(base64 -w0 ${{ github.workspace }}/project/build-output-tail.txt)
           curl -sS --fail-with-body -X PUT \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
