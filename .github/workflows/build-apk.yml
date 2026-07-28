@@ -29,11 +29,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Prepare project directory
-        run: mkdir -p ${{ github.workspace }}/project
-
       - name: Write twa-manifest.json
         run: |
+          mkdir -p ${{ github.workspace }}/project
           cat > ${{ github.workspace }}/project/twa-manifest.json << EOF
           {
             "packageId": "${{ inputs.package_id }}",
@@ -57,99 +55,62 @@ jobs:
             "webManifestUrl": "${{ inputs.manifest_url }}"
           }
           EOF
-          cat ${{ github.workspace }}/project/twa-manifest.json
 
-      # --- Diagnostic steps: each isolates one specific thing so a failure
-      # is immediately attributable, without needing raw log text ---
-
-      - name: Diagnostic 1 - pull bubblewrap image
-        run: docker pull ghcr.io/googlechromelabs/bubblewrap:latest
-
-      - name: Diagnostic 2 - verify tools inside the image
-        run: |
-          docker run --rm --entrypoint=/bin/bash ghcr.io/googlechromelabs/bubblewrap:latest -c "whoami && which keytool && which bubblewrap && bubblewrap --version"
-
-      - name: Diagnostic 3 - verify bind-mount write access
-        run: |
-          docker run --rm --entrypoint=/bin/bash -v ${{ github.workspace }}/project:/project ghcr.io/googlechromelabs/bubblewrap:latest -c "touch /project/write-test.txt && echo wrote-ok"
-          ls -la ${{ github.workspace }}/project/
-
-      - name: Diagnostic 4 - generate signing keystore
-        run: |
-          docker run --rm \
-            --entrypoint=/bin/bash \
-            -v ${{ github.workspace }}/project:/project \
-            -e BUBBLEWRAP_KEYSTORE_PASSWORD=pwaforgeTempPass1 \
-            -e BUBBLEWRAP_KEY_PASSWORD=pwaforgeTempPass1 \
-            ghcr.io/googlechromelabs/bubblewrap:latest \
-            -c 'keytool -genkeypair -v -keystore /project/release.keystore -alias pwaforge -keyalg RSA -keysize 2048 -validity 10000 -storepass "$BUBBLEWRAP_KEYSTORE_PASSWORD" -keypass "$BUBBLEWRAP_KEY_PASSWORD" -dname "CN=PWA Forge,OU=NexaPulse,O=NexaPulse,L=Lagos,S=Lagos,C=NG"'
-          ls -la ${{ github.workspace }}/project/
-
-      - name: Diagnostic 5 - bubblewrap build (output captured to file)
-        continue-on-error: true
+      # Note on the flags/overrides below - each fixes a specific thing that
+      # silently broke automation during testing:
+      #  --entrypoint=/bin/bash : the image's default entrypoint is
+      #    `bubblewrap` itself, so a bare command gets passed to it as an
+      #    invalid subcommand instead of running as a shell command.
+      #  BUBBLEWRAP_KEYSTORE_PASSWORD / BUBBLEWRAP_KEY_PASSWORD : documented
+      #    env vars that let `build` skip its interactive password prompt.
+      #  `yes |` : auto-answers two prompts that otherwise hang forever in
+      #    CI - the Android SDK Build-Tools license, and a "regenerate
+      #    project?" confirmation.
+      - name: Generate keystore and build signed APK
         run: |
           set +e
           docker run --rm \
             --entrypoint=/bin/bash \
             -v ${{ github.workspace }}/project:/project \
             -w /project \
-            -e BUBBLEWRAP_KEYSTORE_PASSWORD=pwaforgeTempPass1 \
-            -e BUBBLEWRAP_KEY_PASSWORD=pwaforgeTempPass1 \
+            -e BUBBLEWRAP_KEYSTORE_PASSWORD=${{ github.run_id }} \
+            -e BUBBLEWRAP_KEY_PASSWORD=${{ github.run_id }} \
             ghcr.io/googlechromelabs/bubblewrap:latest \
-            -c 'yes | bubblewrap build --skipPwaValidation' > ${{ github.workspace }}/project/build-output.txt 2>&1
-          echo "BUBBLEWRAP_EXIT_CODE=$?" | tee -a ${{ github.workspace }}/project/build-output.txt
+            -c '
+              keytool -genkeypair -v -keystore /project/release.keystore -alias pwaforge \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -storepass "$BUBBLEWRAP_KEYSTORE_PASSWORD" -keypass "$BUBBLEWRAP_KEY_PASSWORD" \
+                -dname "CN=PWA Forge,OU=NexaPulse,O=NexaPulse,L=Lagos,S=Lagos,C=NG" &&
+              yes | bubblewrap build --skipPwaValidation
+            ' > ${{ github.workspace }}/project/build-output.txt 2>&1
+          echo "EXIT_CODE=$?" >> ${{ github.workspace }}/project/build-output.txt
 
-          echo "--- searching entire container fs for apk/aab (separate run, same mount) ---" | tee -a ${{ github.workspace }}/project/build-output.txt
-          docker run --rm \
-            --entrypoint=/bin/bash \
-            -v ${{ github.workspace }}/project:/project \
-            ghcr.io/googlechromelabs/bubblewrap:latest \
-            -c 'find / -xdev \( -name "*.apk" -o -name "*.aab" \) 2>/dev/null; find / \( -name "*.apk" -o -name "*.aab" \) 2>/dev/null | while read f; do cp "$f" "/project/found-$(basename "$f")"; echo "copied: $f"; done' \
-            >> ${{ github.workspace }}/project/build-output.txt 2>&1
-
-          echo "--- host-side /project contents ---" | tee -a ${{ github.workspace }}/project/build-output.txt
-          find ${{ github.workspace }}/project -type f | tee -a ${{ github.workspace }}/project/build-output.txt
-
-      - name: Publish captured build log (so it's readable outside the Actions log UI)
+      - name: Publish build log for debugging (readable via raw.githubusercontent.com)
         if: always()
         run: |
           set +e
           tail -c 100000 ${{ github.workspace }}/project/build-output.txt > ${{ github.workspace }}/project/build-output-tail.txt
           B64=$(base64 -w0 ${{ github.workspace }}/project/build-output-tail.txt)
-          echo "B64_LENGTH=${#B64}" > /tmp/publish-resp.txt
-          printf '{"message":"debug log for run %s","content":"%s"}' "${{ github.run_id }}" "$B64" > /tmp/payload.json
-          RESP=$(curl -sS -w "\nHTTPSTATUS:%{http_code}" -X PUT \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/contents/logs/build-${{ github.run_id }}.txt" \
-            --data-binary @/tmp/payload.json 2>&1)
-          CURL_EXIT=$?
-          echo "CURL_EXIT_CODE=$CURL_EXIT" >> /tmp/publish-resp.txt
-          echo "$RESP" >> /tmp/publish-resp.txt
-
-          DIAG_B64=$(head -c 3000 /tmp/publish-resp.txt | base64 -w0)
+          printf '{"message":"build log for run %s","content":"%s"}' "${{ github.run_id }}" "$B64" > /tmp/payload.json
           curl -sS -X PUT \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/contents/logs/publish-diag-${{ github.run_id }}.txt" \
-            -d "{\"message\":\"publish diag\",\"content\":\"$DIAG_B64\"}"
-          echo "Log published to: https://raw.githubusercontent.com/${{ github.repository }}/main/logs/build-${{ github.run_id }}.txt"
+            "https://api.github.com/repos/${{ github.repository }}/contents/logs/build-${{ github.run_id }}.txt" \
+            --data-binary @/tmp/payload.json > /dev/null
 
       - name: Locate and rename output artifact
         run: |
           cd ${{ github.workspace }}/project
-          APK_PATH=$(find . -name "found-*-signed.apk" | head -1)
-          if [ -z "$APK_PATH" ]; then APK_PATH=$(find . -name "found-*.apk" | head -1); fi
-          if [ -z "$APK_PATH" ]; then APK_PATH=$(find . -name "*-signed.apk" | head -1); fi
+          APK_PATH=$(find . -name "*-signed.apk" | head -1)
           if [ -z "$APK_PATH" ]; then APK_PATH=$(find . -name "*.apk" | head -1); fi
-          if [ -z "$APK_PATH" ]; then echo "No APK found — check the published build log."; exit 1; fi
-          cp "$APK_PATH" "${{ inputs.app_name }}.apk"
+          if [ -z "$APK_PATH" ]; then echo "No APK produced - check logs/build-${{ github.run_id }}.txt in this repo."; exit 1; fi
+          cp "$APK_PATH" "app.apk"
 
       - name: Create GitHub Release with the APK attached
         uses: softprops/action-gh-release@v2
         with:
           tag_name: apk-${{ github.run_id }}
           name: "${{ inputs.app_name }} APK"
-          files: ${{ github.workspace }}/project/*.apk
+          files: ${{ github.workspace }}/project/app.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
