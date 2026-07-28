@@ -115,11 +115,20 @@ jobs:
         run: |
           tail -c 100000 ${{ github.workspace }}/project/build-output.txt > ${{ github.workspace }}/project/build-output-tail.txt
           B64=$(base64 -w0 ${{ github.workspace }}/project/build-output-tail.txt)
-          curl -sS --fail-with-body -X PUT \
+          echo "B64_LENGTH=${#B64}" > /tmp/publish-resp.txt
+          RESP=$(curl -sS -w "\nHTTPSTATUS:%{http_code}" -X PUT \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/contents/logs/build-${{ github.run_id }}.txt" \
-            -d "{\"message\":\"debug log for run ${{ github.run_id }}\",\"content\":\"$B64\"}"
+            -d "{\"message\":\"debug log for run ${{ github.run_id }}\",\"content\":\"$B64\"}")
+          echo "$RESP" >> /tmp/publish-resp.txt
+
+          DIAG_B64=$(head -c 3000 /tmp/publish-resp.txt | base64 -w0)
+          curl -sS -X PUT \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/contents/logs/publish-diag-${{ github.run_id }}.txt" \
+            -d "{\"message\":\"publish diag\",\"content\":\"$DIAG_B64\"}"
           echo "Log published to: https://raw.githubusercontent.com/${{ github.repository }}/main/logs/build-${{ github.run_id }}.txt"
 
       - name: Locate and rename output artifact
