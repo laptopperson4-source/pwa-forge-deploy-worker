@@ -121,7 +121,9 @@ jobs:
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/contents/logs/build-${{ github.run_id }}.txt" \
-            -d "{\"message\":\"debug log for run ${{ github.run_id }}\",\"content\":\"$B64\"}")
+            -d "{\"message\":\"debug log for run ${{ github.run_id }}\",\"content\":\"$B64\"}" 2>&1)
+          CURL_EXIT=$?
+          echo "CURL_EXIT_CODE=$CURL_EXIT" >> /tmp/publish-resp.txt
           echo "$RESP" >> /tmp/publish-resp.txt
 
           DIAG_B64=$(head -c 3000 /tmp/publish-resp.txt | base64 -w0)
