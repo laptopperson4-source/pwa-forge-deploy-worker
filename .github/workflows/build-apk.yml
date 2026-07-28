@@ -96,7 +96,7 @@ jobs:
             -e BUBBLEWRAP_KEYSTORE_PASSWORD=pwaforgeTempPass1 \
             -e BUBBLEWRAP_KEY_PASSWORD=pwaforgeTempPass1 \
             ghcr.io/googlechromelabs/bubblewrap:latest \
-            -c 'bubblewrap build --skipPwaValidation' > ${{ github.workspace }}/project/build-output.txt 2>&1
+            -c 'yes | bubblewrap build --skipPwaValidation' > ${{ github.workspace }}/project/build-output.txt 2>&1
           echo "BUBBLEWRAP_EXIT_CODE=$?" | tee -a ${{ github.workspace }}/project/build-output.txt
 
           echo "--- searching entire container fs for apk/aab (separate run, same mount) ---" | tee -a ${{ github.workspace }}/project/build-output.txt
