@@ -1,0 +1,11 @@
+{
+  "name": "Claude Pipeline Test",
+  "short_name": "CPTest",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#000000",
+  "icons": [
+    {"src": "https://raw.githubusercontent.com/laptopperson4-source/pwa-forge-deploy-worker/main/test-assets/test-icon.png", "sizes": "512x512", "type": "image/png"}
+  ]
+}
