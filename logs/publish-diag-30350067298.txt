@@ -1,0 +1,50 @@
+B64_LENGTH=133336
+CURL_EXIT_CODE=0
+{
+  "content": {
+    "name": "build-30350067298.txt",
+    "path": "logs/build-30350067298.txt",
+    "sha": "94d8205b4a550aa98dbada3aeaedf06d3771656b",
+    "size": 100000,
+    "url": "https://api.github.com/repos/laptopperson4-source/pwa-forge-deploy-worker/contents/logs/build-30350067298.txt?ref=main",
+    "html_url": "https://github.com/laptopperson4-source/pwa-forge-deploy-worker/blob/main/logs/build-30350067298.txt",
+    "git_url": "https://api.github.com/repos/laptopperson4-source/pwa-forge-deploy-worker/git/blobs/94d8205b4a550aa98dbada3aeaedf06d3771656b",
+    "download_url": "https://raw.githubusercontent.com/laptopperson4-source/pwa-forge-deploy-worker/main/logs/build-30350067298.txt",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/laptopperson4-source/pwa-forge-deploy-worker/contents/logs/build-30350067298.txt?ref=main",
+      "git": "https://api.github.com/repos/laptopperson4-source/pwa-forge-deploy-worker/git/blobs/94d8205b4a550aa98dbada3aeaedf06d3771656b",
+      "html": "https://github.com/laptopperson4-source/pwa-forge-deploy-worker/blob/main/logs/build-30350067298.txt"
+    }
+  },
+  "commit": {
+    "sha": "81ff2fbacd24a51d139f3d6e9f53499737113925",
+    "node_id": "C_kwDOTcrUCtoAKDgxZmYyZmJhY2QyNGE1MWQxMzlmM2Q2ZTlmNTM0OTk3MzcxMTM5MjU",
+    "url": "https://api.github.com/repos/laptopperson4-source/pwa-forge-deploy-worker/git/commits/81ff2fbacd24a51d139f3d6e9f53499737113925",
+    "html_url": "https://github.com/laptopperson4-source/pwa-forge-deploy-worker/commit/81ff2fbacd24a51d139f3d6e9f53499737113925",
+    "author": {
+      "name": "github-actions[bot]",
+      "email": "41898282+github-actions[bot]@users.noreply.github.com",
+      "date": "2026-07-28T10:16:49Z"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "date": "2026-07-28T10:16:49Z"
+    },
+    "tree": {
+      "sha": "7cc6cceb35b9bd76468ac988d39831217f215ee8",
+      "url": "https://api.github.com/repos/laptopperson4-source/pwa-forge-deploy-worker/git/trees/7cc6cceb35b9bd76468ac988d39831217f215ee8"
+    },
+    "message": "debug log for run 30350067298",
+    "parents": [
+      {
+        "sha": "7d7ca2a73d0e9ab70758f01c669ac1dbd91fce39",
+        "url": "https://api.github.com/repos/laptopperson4-source/pwa-forge-deploy-worker/git/commits/7d7ca2a73d0e9ab70758f01c669ac1dbd91fce39",
+        "html_url": "https://github.com/laptopperson4-source/pwa-forge-deploy-worker/commit/7d7ca2a73d0e9ab70758f01c669ac1dbd91fce39"
+      }
+    ],
+    "verification": {
+      "verified": true,
+      "reason": "valid",
+      "signature": "-----BEGIN PGP SIGNATURE-----\n\nwsFcBAABCAAQBQJqaIGRCRC1aQ7uu5UhlAAAb1YQAIcdPt7Ajs8baUvT9jyaPZjZ\nyw71HW7O8pXP80IyHIdT6TqU6bj1aeUT3wY9iHoJDhBeU5emOsMci4+F0q04vKY8\npDZ7vmNevBq1vaP4IPAzvcOvtzs2fupR63R0IoN422mVunTiTd7diQKJMWQ8Yd7x\npTeQY07RZAEEv7Nfs19uKWqosrF1waSpOgoWGkAFiZCOmHFyNJcx/0/6k0Q5bNvJ\nyf6xVpTlFgw2I4iqOV02W2Ye7JIM0cdXIM4xk6rZT8bNNqyCPseUoHi/u+FLfTOg\nJ/r
