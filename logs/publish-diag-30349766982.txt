@@ -1,0 +1,3 @@
+B64_LENGTH=133336
+CURL_EXIT_CODE=126
+/home/runner/work/_temp/a75aa017-66d2-48fb-a35a-600152d50217.sh: line 9: /usr/bin/curl: Argument list too long
