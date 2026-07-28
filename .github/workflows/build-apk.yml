@@ -26,6 +26,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Prepare project directory
         run: mkdir -p ${{ github.workspace }}/project
@@ -83,8 +85,10 @@ jobs:
             -c 'keytool -genkeypair -v -keystore /project/release.keystore -alias pwaforge -keyalg RSA -keysize 2048 -validity 10000 -storepass "$BUBBLEWRAP_KEYSTORE_PASSWORD" -keypass "$BUBBLEWRAP_KEY_PASSWORD" -dname "CN=PWA Forge,OU=NexaPulse,O=NexaPulse,L=Lagos,S=Lagos,C=NG"'
           ls -la ${{ github.workspace }}/project/
 
-      - name: Diagnostic 5 - bubblewrap build and locate output
+      - name: Diagnostic 5 - bubblewrap build (output captured to file)
+        continue-on-error: true
         run: |
+          set +e
           docker run --rm \
             --entrypoint=/bin/bash \
             -v ${{ github.workspace }}/project:/project \
@@ -92,32 +96,39 @@ jobs:
             -e BUBBLEWRAP_KEYSTORE_PASSWORD=pwaforgeTempPass1 \
             -e BUBBLEWRAP_KEY_PASSWORD=pwaforgeTempPass1 \
             ghcr.io/googlechromelabs/bubblewrap:latest \
-            -c '
-              set -x
-              bubblewrap build --skipPwaValidation
-              echo "BUILD_EXIT=$?"
-              echo "--- searching entire container fs for apk/aab ---"
-              find / -xdev \( -name "*.apk" -o -name "*.aab" \) 2>/dev/null
-              find / \( -name "*.apk" -o -name "*.aab" \) 2>/dev/null | while read f; do
-                cp "$f" "/project/found-$(basename "$f")"
-                echo "copied: $f"
-              done
-              echo "--- /project contents now ---"
-              ls -la /project
-            '
-          echo "--- host-side project dir after container exit ---"
-          find ${{ github.workspace }}/project -type f
+            -c 'bubblewrap build --skipPwaValidation' > ${{ github.workspace }}/project/build-output.txt 2>&1
+          echo "BUBBLEWRAP_EXIT_CODE=$?" | tee -a ${{ github.workspace }}/project/build-output.txt
+
+          echo "--- searching entire container fs for apk/aab (separate run, same mount) ---" | tee -a ${{ github.workspace }}/project/build-output.txt
+          docker run --rm \
+            --entrypoint=/bin/bash \
+            -v ${{ github.workspace }}/project:/project \
+            ghcr.io/googlechromelabs/bubblewrap:latest \
+            -c 'find / -xdev \( -name "*.apk" -o -name "*.aab" \) 2>/dev/null; find / \( -name "*.apk" -o -name "*.aab" \) 2>/dev/null | while read f; do cp "$f" "/project/found-$(basename "$f")"; echo "copied: $f"; done' \
+            >> ${{ github.workspace }}/project/build-output.txt 2>&1
+
+          echo "--- host-side /project contents ---" | tee -a ${{ github.workspace }}/project/build-output.txt
+          find ${{ github.workspace }}/project -type f | tee -a ${{ github.workspace }}/project/build-output.txt
+
+      - name: Publish captured build log (so it's readable outside the Actions log UI)
+        if: always()
+        run: |
+          B64=$(base64 -w0 ${{ github.workspace }}/project/build-output.txt)
+          curl -sS --fail-with-body -X PUT \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/contents/logs/build-${{ github.run_id }}.txt" \
+            -d "{\"message\":\"debug log for run ${{ github.run_id }}\",\"content\":\"$B64\"}"
+          echo "Log published to: https://raw.githubusercontent.com/${{ github.repository }}/main/logs/build-${{ github.run_id }}.txt"
 
       - name: Locate and rename output artifact
         run: |
           cd ${{ github.workspace }}/project
-          echo "--- all files in project dir ---"
-          find . -maxdepth 6 -type f
           APK_PATH=$(find . -name "found-*-signed.apk" | head -1)
           if [ -z "$APK_PATH" ]; then APK_PATH=$(find . -name "found-*.apk" | head -1); fi
           if [ -z "$APK_PATH" ]; then APK_PATH=$(find . -name "*-signed.apk" | head -1); fi
           if [ -z "$APK_PATH" ]; then APK_PATH=$(find . -name "*.apk" | head -1); fi
-          echo "Using: $APK_PATH"
+          if [ -z "$APK_PATH" ]; then echo "No APK found — check the published build log."; exit 1; fi
           cp "$APK_PATH" "${{ inputs.app_name }}.apk"
 
       - name: Create GitHub Release with the APK attached
