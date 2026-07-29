@@ -32,6 +32,7 @@ jobs:
       - name: Write twa-manifest.json
         run: |
           mkdir -p ${{ github.workspace }}/project
+          echo "${{ secrets.SIGNING_KEYSTORE_B64 }}" | base64 -d > ${{ github.workspace }}/project/release.keystore
           cat > ${{ github.workspace }}/project/twa-manifest.json << EOF
           {
             "packageId": "${{ inputs.package_id }}",
@@ -66,23 +67,17 @@ jobs:
       #  `yes |` : auto-answers two prompts that otherwise hang forever in
       #    CI - the Android SDK Build-Tools license, and a "regenerate
       #    project?" confirmation.
-      - name: Generate keystore and build signed APK
+      - name: Build signed APK using the persistent signing key
         run: |
           set +e
           docker run --rm \
             --entrypoint=/bin/bash \
             -v ${{ github.workspace }}/project:/project \
             -w /project \
-            -e BUBBLEWRAP_KEYSTORE_PASSWORD=${{ github.run_id }} \
-            -e BUBBLEWRAP_KEY_PASSWORD=${{ github.run_id }} \
+            -e BUBBLEWRAP_KEYSTORE_PASSWORD=${{ secrets.SIGNING_KEY_PASSWORD }} \
+            -e BUBBLEWRAP_KEY_PASSWORD=${{ secrets.SIGNING_KEY_PASSWORD }} \
             ghcr.io/googlechromelabs/bubblewrap:latest \
-            -c '
-              keytool -genkeypair -v -keystore /project/release.keystore -alias pwaforge \
-                -keyalg RSA -keysize 2048 -validity 10000 \
-                -storepass "$BUBBLEWRAP_KEYSTORE_PASSWORD" -keypass "$BUBBLEWRAP_KEY_PASSWORD" \
-                -dname "CN=PWA Forge,OU=NexaPulse,O=NexaPulse,L=Lagos,S=Lagos,C=NG" &&
-              yes | bubblewrap build --skipPwaValidation
-            ' > ${{ github.workspace }}/project/build-output.txt 2>&1
+            -c 'yes | bubblewrap build --skipPwaValidation' > ${{ github.workspace }}/project/build-output.txt 2>&1
           echo "EXIT_CODE=$?" >> ${{ github.workspace }}/project/build-output.txt
 
       - name: Publish build log for debugging (readable via raw.githubusercontent.com)
