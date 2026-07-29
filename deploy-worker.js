@@ -31,6 +31,10 @@
  *                                   markup, not a raster image, so it's never
  *                                   blurry and isn't limited to a fixed shape
  *                                   library like the old template engine)
+ *        GITHUB_TOKEN   (Secret)  = a GitHub token with repo + workflow
+ *                                   permission — used for /build-apk and
+ *                                   /apk-status, which trigger and check on
+ *                                   the TWA APK build workflow
  *   5. Copy the Worker's URL (shown at the top, ends in .workers.dev) and
  *      send it back — that's the only thing that goes into the Forge page.
  *
@@ -60,8 +64,16 @@ export default {
       return handleDebug(url.pathname.slice('/debug/'.length), env, cors);
     }
 
+    if (url.pathname === '/build-apk' && request.method === 'POST') {
+      return handleBuildApk(request, env, cors);
+    }
+
+    if (url.pathname.startsWith('/apk-status/') && request.method === 'GET') {
+      return handleApkStatus(url.pathname.slice('/apk-status/'.length), env, cors);
+    }
+
     if (url.pathname !== '/deploy' || request.method !== 'POST') {
-      return new Response(JSON.stringify({ error: 'POST /deploy, POST /generate-icon, or GET /debug/<project-slug>' }), {
+      return new Response(JSON.stringify({ error: 'POST /deploy, POST /generate-icon, POST /build-apk, GET /apk-status/<run_id>, or GET /debug/<project-slug>' }), {
         status: 404, headers: { ...cors, 'Content-Type': 'application/json' }
       });
     }
@@ -283,6 +295,97 @@ function contentTypeFor(path) {
   if (path.endsWith('.png')) return 'image/png';
   if (path.endsWith('.txt')) return 'text/plain';
   return 'application/octet-stream';
+}
+
+const APK_REPO = 'laptopperson4-source/pwa-forge-deploy-worker';
+
+async function handleBuildApk(request, env, cors) {
+  try {
+    if (!env.GITHUB_TOKEN) throw new Error('Worker is missing the GITHUB_TOKEN secret');
+    const { projectName, appName, manifestUrl, iconUrl, themeColor } = await request.json();
+    if (!projectName || !appName || !manifestUrl || !iconUrl) {
+      throw new Error('projectName, appName, manifestUrl, and iconUrl are required');
+    }
+
+    const siteHost = new URL(manifestUrl).host;
+    const packageSuffix = projectName.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 40) || 'app';
+    const packageId = 'app.pwaforge.' + (/^[0-9]/.test(packageSuffix) ? 'a' + packageSuffix : packageSuffix);
+
+    const ghHeaders = {
+      'Authorization': `Bearer ${env.GITHUB_TOKEN}`,
+      'Accept': 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+      'User-Agent': 'pwa-forge-deploy-worker'
+    };
+
+    const dispatchRes = await fetch(`https://api.github.com/repos/${APK_REPO}/actions/workflows/build-apk.yml/dispatches`, {
+      method: 'POST', headers: ghHeaders,
+      body: JSON.stringify({
+        ref: 'main',
+        inputs: { site_host: siteHost, manifest_url: manifestUrl, icon_url: iconUrl, app_name: appName, package_id: packageId, theme_color: themeColor || '#0B0B0B' }
+      })
+    });
+    if (!dispatchRes.ok) throw new Error('Could not dispatch APK build: ' + await dispatchRes.text());
+
+    // workflow_dispatch doesn't return a run id, so poll briefly for the run it just created
+    let runId = null;
+    for (let i = 0; i < 5 && !runId; i++) {
+      await new Promise(r => setTimeout(r, 1500));
+      const runsRes = await fetch(`https://api.github.com/repos/${APK_REPO}/actions/workflows/build-apk.yml/runs?per_page=1`, { headers: ghHeaders });
+      const runsData = await runsRes.json();
+      if (runsData.workflow_runs && runsData.workflow_runs[0]) runId = runsData.workflow_runs[0].id;
+    }
+    if (!runId) throw new Error('Build was dispatched but no run was found yet — try checking status again shortly.');
+
+    return new Response(JSON.stringify({ runId, statusUrl: `/apk-status/${runId}` }), {
+      headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  } catch (err) {
+    return new Response(JSON.stringify({ error: err.message || String(err) }), {
+      status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+async function handleApkStatus(runId, env, cors) {
+  try {
+    if (!env.GITHUB_TOKEN) throw new Error('Worker is missing the GITHUB_TOKEN secret');
+    runId = runId.replace(/[^0-9]/g, '');
+    if (!runId) throw new Error('A numeric run id is required');
+
+    const ghHeaders = {
+      'Authorization': `Bearer ${env.GITHUB_TOKEN}`,
+      'Accept': 'application/vnd.github+json',
+      'User-Agent': 'pwa-forge-deploy-worker'
+    };
+
+    const runRes = await fetch(`https://api.github.com/repos/${APK_REPO}/actions/runs/${runId}`, { headers: ghHeaders });
+    const runData = await runRes.json();
+    if (!runRes.ok) throw new Error('Could not check run status: ' + JSON.stringify(runData));
+
+    if (runData.status !== 'completed') {
+      return new Response(JSON.stringify({ status: 'building' }), { headers: { ...cors, 'Content-Type': 'application/json' } });
+    }
+    if (runData.conclusion !== 'success') {
+      return new Response(JSON.stringify({
+        status: 'failed',
+        logUrl: `https://raw.githubusercontent.com/${APK_REPO}/main/logs/build-${runId}.txt`
+      }), { headers: { ...cors, 'Content-Type': 'application/json' } });
+    }
+
+    const relRes = await fetch(`https://api.github.com/repos/${APK_REPO}/releases/tags/apk-${runId}`, { headers: ghHeaders });
+    const relData = await relRes.json();
+    const asset = relData.assets && relData.assets.find(a => a.name.endsWith('.apk'));
+    if (!asset) throw new Error('Build succeeded but no APK asset was found on the release.');
+
+    return new Response(JSON.stringify({ status: 'ready', downloadUrl: asset.browser_download_url }), {
+      headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  } catch (err) {
+    return new Response(JSON.stringify({ error: err.message || String(err) }), {
+      status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
 }
 
 async function handleGenerateIcon(request, env, cors) {
