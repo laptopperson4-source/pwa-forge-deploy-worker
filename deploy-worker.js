@@ -64,6 +64,10 @@ export default {
       return handleDebug(url.pathname.slice('/debug/'.length), env, cors);
     }
 
+    if (url.pathname === '/check-url' && request.method === 'GET') {
+      return handleCheckUrl(url.searchParams.get('u'), cors);
+    }
+
     if (url.pathname === '/build-apk' && request.method === 'POST') {
       return handleBuildApk(request, env, cors);
     }
@@ -298,6 +302,30 @@ function contentTypeFor(path) {
 }
 
 const APK_REPO = 'laptopperson4-source/pwa-forge-deploy-worker';
+
+async function handleCheckUrl(target, cors) {
+  try {
+    if (!target) throw new Error('Pass the target as ?u=<url-encoded-url>');
+    const targetUrl = new URL(target);
+    if (!['http:', 'https:'].includes(targetUrl.protocol)) throw new Error('Only http/https URLs are allowed');
+
+    const res = await fetch(targetUrl.toString(), { redirect: 'follow' });
+    const contentType = res.headers.get('content-type') || '';
+    const text = await res.text();
+
+    return new Response(JSON.stringify({
+      url: targetUrl.toString(),
+      status: res.status,
+      ok: res.ok,
+      contentType,
+      body: text.slice(0, 20000)
+    }, null, 2), { headers: { ...cors, 'Content-Type': 'application/json' } });
+  } catch (err) {
+    return new Response(JSON.stringify({ error: err.message || String(err) }), {
+      status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
+    });
+  }
+}
 
 async function handleBuildApk(request, env, cors) {
   try {
