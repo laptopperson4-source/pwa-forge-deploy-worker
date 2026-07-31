@@ -65,7 +65,7 @@ export default {
     }
 
     if (url.pathname === '/check-url' && request.method === 'GET') {
-      return handleCheckUrl(url.searchParams.get('u'), cors);
+      return handleCheckUrl(url.searchParams.get('u'), env, cors);
     }
 
     if (url.pathname === '/build-apk' && request.method === 'POST') {
@@ -303,7 +303,7 @@ function contentTypeFor(path) {
 
 const APK_REPO = 'laptopperson4-source/pwa-forge-deploy-worker';
 
-async function handleCheckUrl(target, cors) {
+async function handleCheckUrl(target, env, cors) {
   try {
     if (!target) throw new Error('Pass the target as ?u=<url-encoded-url>');
     const targetUrl = new URL(target);
@@ -313,13 +313,29 @@ async function handleCheckUrl(target, cors) {
     const contentType = res.headers.get('content-type') || '';
     const text = await res.text();
 
-    return new Response(JSON.stringify({
+    const result = {
       url: targetUrl.toString(),
       status: res.status,
       ok: res.ok,
       contentType,
       body: text.slice(0, 20000)
-    }, null, 2), { headers: { ...cors, 'Content-Type': 'application/json' } });
+    };
+
+    let publishedTo = null;
+    if (env.GITHUB_TOKEN) {
+      try {
+        const slug = 'check-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+        const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(result, null, 2))));
+        await fetch(`https://api.github.com/repos/${APK_REPO}/contents/logs/${slug}.json`, {
+          method: 'PUT',
+          headers: { 'Authorization': `Bearer ${env.GITHUB_TOKEN}`, 'Accept': 'application/vnd.github+json', 'User-Agent': 'pwa-forge-deploy-worker' },
+          body: JSON.stringify({ message: 'check-url result', content: b64 })
+        });
+        publishedTo = `https://raw.githubusercontent.com/${APK_REPO}/main/logs/${slug}.json`;
+      } catch (e) { /* publishing is best-effort */ }
+    }
+
+    return new Response(JSON.stringify({ ...result, publishedTo }, null, 2), { headers: { ...cors, 'Content-Type': 'application/json' } });
   } catch (err) {
     return new Response(JSON.stringify({ error: err.message || String(err) }), {
       status: 500, headers: { ...cors, 'Content-Type': 'application/json' }
