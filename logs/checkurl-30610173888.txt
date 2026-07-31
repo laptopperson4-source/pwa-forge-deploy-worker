@@ -1,0 +1,30 @@
+URL: https://ytshorts-j5bbm.laptopperson4.workers.dev/.well-known/assetlinks.json
+--- headers ---
+HTTP/2 200 
+date: Fri, 31 Jul 2026 06:36:56 GMT
+content-type: application/json
+content-length: 345
+cf-cache-status: MISS
+cache-control: public, max-age=0, must-revalidate
+etag: "aea2e0a9fb94f9aec934d17c211caaab"
+report-to: {"group":"cf-nel","max_age":604800,"endpoints":[{"url":"https://a.nel.cloudflare.com/report/v4?s=U2dmKNRlRvOiDAjbL61uTYVr6r65QIZiXAzxtFiy%2FJgCXYY5DbvprooGHrPMk0PNCw2%2B1yd%2F76BB7AITt%2F5PeOl8%2B69kXDSdmGYjqL9%2FPKyhs1EzvYqKnyIsq%2FJ7fX%2FqRs1ivSuqE7qISDYcKcF7IeUkXl5ZhAtKvRuW"}]}
+nel: {"report_to":"cf-nel","success_fraction":0.0,"max_age":604800}
+server: cloudflare
+cf-ray: a23a9770bea5dfe8-SEA
+alt-svc: h3=":443"; ma=86400
+
+--- body ---
+[
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls"
+    ],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "app.pwaforge.ytshortsj5bbm",
+      "sha256_cert_fingerprints": [
+        "7A:78:45:56:E7:11:47:A9:2E:D4:32:F0:68:32:C5:EC:8E:9B:98:D1:51:B6:91:B5:A0:F4:EF:96:6F:8C:D1:70"
+      ]
+    }
+  }
+]
