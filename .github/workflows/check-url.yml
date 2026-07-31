@@ -1,0 +1,32 @@
+name: Check URL
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'URL to fetch'
+        required: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Fetch and publish result
+        run: |
+          set +e
+          {
+            echo "URL: ${{ inputs.url }}"
+            echo "--- headers ---"
+            curl -sS -D - -o /tmp/body.txt "${{ inputs.url }}"
+            echo "--- body ---"
+            cat /tmp/body.txt
+          } > /tmp/result.txt 2>&1
+          B64=$(base64 -w0 /tmp/result.txt)
+          printf '{"message":"check-url result for run %s","content":"%s"}' "${{ github.run_id }}" "$B64" > /tmp/payload.json
+          curl -sS -X PUT \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/contents/logs/checkurl-${{ github.run_id }}.txt" \
+            --data-binary @/tmp/payload.json > /dev/null
