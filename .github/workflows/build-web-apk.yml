@@ -1,0 +1,129 @@
+name: Build Capacitor Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: 'owner/repo containing the web project files (checked out into www/)'
+        required: true
+      app_name:
+        required: true
+      package_id:
+        description: 'no hyphens'
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout the web project
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.source_repo }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: webproject
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses > /dev/null 2>&1 || true
+
+      - name: Scaffold Capacitor project
+        run: |
+          set -e
+          mkdir -p capproj/www
+          cp -r webproject/. capproj/www/
+          cd capproj
+          npm init -y > /dev/null
+          npm install --no-fund --no-audit @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6 > /tmp/npm-install.log 2>&1
+          npx cap init "${{ inputs.app_name }}" "${{ inputs.package_id }}" --web-dir www
+          npx cap add android
+
+      - name: Wire up signing
+        run: |
+          echo "${{ secrets.SIGNING_KEYSTORE_B64 }}" | base64 -d > capproj/android/release.keystore
+          cat > capproj/android/keystore.properties << EOF2
+          storeFile=../release.keystore
+          storePassword=${{ secrets.SIGNING_KEY_PASSWORD }}
+          keyAlias=pwaforge
+          keyPassword=${{ secrets.SIGNING_KEY_PASSWORD }}
+          EOF2
+          python3 - << 'PYEOF'
+          path = "capproj/android/app/build.gradle"
+          src = open(path).read()
+          inject = '''
+          def keystorePropertiesFile = rootProject.file("keystore.properties")
+          def keystoreProperties = new Properties()
+          keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+          '''
+          src = inject + src
+          src = src.replace(
+              "android {",
+              '''android {
+              signingConfigs {
+                  release {
+                      storeFile file(keystoreProperties['storeFile'])
+                      storePassword keystoreProperties['storePassword']
+                      keyAlias keystoreProperties['keyAlias']
+                      keyPassword keystoreProperties['keyPassword']
+                  }
+              }''', 1
+          )
+          src = src.replace(
+              "buildTypes {",
+              '''buildTypes {
+                  release {
+                      signingConfig signingConfigs.release
+                  }''', 1
+          )
+          open(path, "w").write(src)
+          PYEOF
+          cat capproj/android/app/build.gradle
+
+      - name: Build signed APK
+        run: |
+          set +e
+          cd capproj/android
+          chmod +x gradlew
+          ./gradlew assembleRelease > ${{ github.workspace }}/build-output.txt 2>&1
+          echo "EXIT_CODE=$?" >> ${{ github.workspace }}/build-output.txt
+
+      - name: Publish build log for debugging
+        if: always()
+        run: |
+          set +e
+          tail -c 100000 build-output.txt > build-output-tail.txt
+          B64=$(base64 -w0 build-output-tail.txt)
+          printf '{"message":"web-apk build log for run %s","content":"%s"}' "${{ github.run_id }}" "$B64" > /tmp/payload.json
+          curl -sS -X PUT \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/contents/logs/webapk-${{ github.run_id }}.txt" \
+            --data-binary @/tmp/payload.json > /dev/null
+
+      - name: Locate and rename APK
+        run: |
+          find capproj -name "*.apk"
+          APK_PATH=$(find capproj -name "*.apk" | head -1)
+          if [ -z "$APK_PATH" ]; then echo "No APK found - check logs/webapk-${{ github.run_id }}.txt"; exit 1; fi
+          cp "$APK_PATH" app.apk
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: genforge-${{ github.run_id }}
+          name: "${{ inputs.app_name }} (General Forge)"
+          files: ${{ github.workspace }}/app.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
