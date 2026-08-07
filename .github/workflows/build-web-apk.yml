@@ -50,6 +50,16 @@ jobs:
           npx cap init "${{ inputs.app_name }}" "${{ inputs.package_id }}" --web-dir www
           npx cap add android
 
+      - name: Generate app icons from source image (if provided)
+        run: |
+          cd capproj
+          if [ -f "www/_forge-icon.png" ]; then
+            mkdir -p resources
+            cp www/_forge-icon.png resources/icon.png
+            npm install --no-fund --no-audit @capacitor/assets@3 > /tmp/assets-install.log 2>&1
+            npx capacitor-assets generate --android || true
+          fi
+
       - name: Wire up signing
         run: |
           echo "${{ secrets.SIGNING_KEYSTORE_B64 }}" | base64 -d > capproj/android/release.keystore
